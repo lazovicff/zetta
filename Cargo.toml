@@ -1,0 +1,70 @@
+[package]
+name = "zetta"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+hex = "0.4"
+light-poseidon = "0.4"
+ark-bn254 = "0.5"
+ark-ff = "0.5"
+ark-std = "0.5"
+sha3 = "0.10"
+rand = "0.8"
+sha2 = "0.10"
+ark-grumpkin = "0.5"
+ark-groth16 = "0.5"
+ark-ec = "0.5"
+ark-serialize = "0.5"
+ark-poly = "0.5"
+ark-r1cs-std = "0.5"
+ark-relations = "0.5"
+ark-crypto-primitives = { version = "0.5", features = ["crh", "constraints"] }
+ark-snark = "0.5"
+num-bigint = "0.4"
+anyhow = "1.0"
+rand_chacha = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+alloy = { version = "1", features = [
+    "providers",
+    "provider-ws",
+    "rpc-types-eth",
+    "sol-types",
+    "contract",
+    "signers",
+    "signer-local",
+    "node-bindings",
+] }
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+clap = { version = "4", features = ["derive"] }
+
+# Nova folding (sonobe fork, matches zERC20 reference)
+folding-schemes = { git = "https://github.com/kbizikav/sonobe", rev = "9f201b8b77eed8dfdb464304d3a4d624b5f5f2dd", default-features = false }
+solidity-verifiers = { git = "https://github.com/kbizikav/sonobe", rev = "9f201b8b77eed8dfdb464304d3a4d624b5f5f2dd", default-features = false }
+
+[patch.crates-io]
+# groth16 is vendored at vendor/groth16 (arkworks-rs/groth16 @ b3b4a15, with its
+# unpinned `git` deps rewritten to crates.io version reqs) so its deps resolve
+# through the patches below instead of floating on arkworks main branches.
+ark-groth16 = { git = "https://github.com/lazovicff/groth16", rev = "29e2128807c0c73fb737e1a60cfe54ab67099703" }
+ark-ff = { git = "https://github.com/arkworks-rs/algebra", rev = "c1f4f5665504154a9de2345f464b0b3da72c28ec" }
+ark-ec = { git = "https://github.com/arkworks-rs/algebra", rev = "c1f4f5665504154a9de2345f464b0b3da72c28ec" }
+ark-serialize = { git = "https://github.com/arkworks-rs/algebra", rev = "c1f4f5665504154a9de2345f464b0b3da72c28ec" }
+ark-poly = { git = "https://github.com/arkworks-rs/algebra", rev = "c1f4f5665504154a9de2345f464b0b3da72c28ec" }
+# snark stays un-rev'd (same as the zERC20 reference): winderica's crypto-primitives
+# and r1cs-std declare UNPINNED deps on arkworks-rs/snark.git, and cargo only
+# unifies same-source deps — a rev-pinned patch here would create a duplicate
+# ark-relations crate (type mismatch at the sonobe<->gadget boundary).
+# Cargo.lock freezes the resolved commit (845ce9d) until cargo update is run.
+ark-relations = { git = "https://github.com/arkworks-rs/snark" }
+ark-snark = { git = "https://github.com/arkworks-rs/snark" }
+ark-crypto-primitives = { git = "https://github.com/winderica/crypto-primitives", rev = "af003fc" }
+ark-r1cs-std = { git = "https://github.com/winderica/r1cs-std", rev = "ae8283a" }
+ark-std = { git = "https://github.com/arkworks-rs/std", rev = "73dcad0" }
+ark-poly-commit = { git = "https://github.com/arkworks-rs/poly-commit", rev = "a05ec99d0d3e46c8ba0d6d3592980777bc2847e8" }
+ark-bn254 = { git = "https://github.com/arkworks-rs/algebra", rev = "c1f4f5665504154a9de2345f464b0b3da72c28ec" }
+ark-grumpkin = { git = "https://github.com/arkworks-rs/algebra", rev = "c1f4f5665504154a9de2345f464b0b3da72c28ec" }
+ark-bls12-381 = { git = "https://github.com/arkworks-rs/algebra", rev = "c1f4f5665504154a9de2345f464b0b3da72c28ec" }
