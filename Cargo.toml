@@ -40,6 +40,8 @@ alloy = { version = "1", features = [
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
 clap = { version = "4", features = ["derive"] }
+dotenv = "0.15"
+axum = "0.7"
 
 # Nova folding (sonobe fork, matches zERC20 reference)
 folding-schemes = { git = "https://github.com/kbizikav/sonobe", rev = "9f201b8b77eed8dfdb464304d3a4d624b5f5f2dd", default-features = false }

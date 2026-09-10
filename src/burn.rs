@@ -8,14 +8,20 @@ use alloy::{
 };
 use ark_bn254::Fr;
 use ark_ff::{BigInteger, PrimeField};
-
-use crate::zkp::poseidon2;
+use light_poseidon::{Poseidon, PoseidonHasher};
 
 sol! {
     #[sol(rpc)]
     interface IERC20 {
         function transfer(address to, uint256 value) external returns (bool);
     }
+}
+
+/// Generate `count` PoW-valid secrets (and their burn addresses) for `recipient`.
+pub fn gen_secrets(recipient: Fr, count: usize, pow_bits: u32) -> Vec<([u8; 20], Fr)> {
+    (0..count)
+        .map(|_| find_burn_address(recipient, pow_bits))
+        .collect()
 }
 
 /// `recipient = trim246(keccak256(chain_id_be8 ‖ address_20 ‖ tweak_32))`.
@@ -63,9 +69,10 @@ pub fn check_pow(x: Fr, n: u32) -> bool {
 pub fn find_burn_address(recipient: Fr, pow_bits: u32) -> ([u8; 20], Fr) {
     use ark_std::UniformRand;
     let mut rng = rand::thread_rng();
+    let mut poseidon = Poseidon::<Fr>::new_circom(2).expect("poseidon");
     loop {
         let secret = Fr::rand(&mut rng);
-        let h = poseidon2(recipient, secret).expect("poseidon");
+        let h = poseidon.hash(&[recipient, secret]).expect("poseidon");
         if check_pow(h, pow_bits) {
             return (trim_to_160(h), secret);
         }
@@ -107,6 +114,7 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
+    use crate::zkp::poseidon2;
     use ark_ff::{BigInteger, Field, Zero};
 
     use super::*;
