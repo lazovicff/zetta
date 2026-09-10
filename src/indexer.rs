@@ -1,7 +1,8 @@
 //! Watch Transfer events, maintain hash chain + tree (Phase E).
 
-use crate::burn::{address_to_fr, poseidon2};
+use crate::burn::address_to_fr;
 use crate::tree::{HashChain, MerkleTree};
+use crate::zkp::poseidon2;
 use alloy::sol_types::SolEvent;
 use alloy::{
     primitives::{Address, U256},

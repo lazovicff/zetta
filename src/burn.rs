@@ -8,19 +8,14 @@ use alloy::{
 };
 use ark_bn254::Fr;
 use ark_ff::{BigInteger, PrimeField};
-use light_poseidon::{Poseidon, PoseidonHasher};
+
+use crate::zkp::poseidon2;
 
 sol! {
     #[sol(rpc)]
     interface IERC20 {
         function transfer(address to, uint256 value) external returns (bool);
     }
-}
-
-/// Circomlib-compatible 2-ary Poseidon over bn254.
-pub fn poseidon2(a: Fr, b: Fr) -> Result<Fr, light_poseidon::PoseidonError> {
-    let mut p = Poseidon::<Fr>::new_circom(2)?;
-    p.hash(&[a, b])
 }
 
 /// `recipient = trim246(keccak256(chain_id_be8 ‖ address_20 ‖ tweak_32))`.

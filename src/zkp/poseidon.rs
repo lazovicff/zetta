@@ -1,18 +1,29 @@
 use ark_bn254::Fr;
 use ark_r1cs_std::fields::{FieldVar, fp::FpVar};
 use ark_relations::gr1cs::SynthesisError;
-use light_poseidon::parameters::bn254_x5::get_poseidon_parameters;
+use light_poseidon::{Poseidon, PoseidonHasher, parameters::bn254_x5::get_poseidon_parameters};
 
-/// In-circuit 2-ary Poseidon over bn254 (circomlib params).
-/// Matches `crate::burn::poseidon2` (light-poseidon `new_circom(2)`).
-pub fn poseidon2_var(a: FpVar<Fr>, b: FpVar<Fr>) -> Result<FpVar<Fr>, SynthesisError> {
-    let params = get_poseidon_parameters::<Fr>(3).expect("poseidon params");
-    let width = params.width; // 3
-    let full_rounds = params.full_rounds; // 8
-    let partial_rounds = params.partial_rounds; // 57
+/// Circomlib-compatible 2-ary Poseidon over bn254.
+pub fn poseidon2(a: Fr, b: Fr) -> Result<Fr, light_poseidon::PoseidonError> {
+    let mut p = Poseidon::<Fr>::new_circom(2)?;
+    p.hash(&[a, b])
+}
 
-    // state = [0, a, b] (domain tag 0, then inputs)
-    let mut state = vec![FpVar::<Fr>::zero(), a, b];
+/// Circomlib-compatible 3-ary Poseidon over bn254.
+pub fn poseidon3(a: Fr, b: Fr, c: Fr) -> Result<Fr, light_poseidon::PoseidonError> {
+    let mut p = Poseidon::<Fr>::new_circom(3)?;
+    p.hash(&[a, b, c])
+}
+
+pub fn poseidon_var(inputs: &[FpVar<Fr>]) -> Result<FpVar<Fr>, SynthesisError> {
+    assert!(inputs.len() < 256);
+    let params = get_poseidon_parameters::<Fr>(inputs.len() as u8 + 1).expect("poseidon params");
+    let width = params.width;
+    let full_rounds = params.full_rounds;
+    let partial_rounds = params.partial_rounds;
+
+    let mut state = vec![FpVar::<Fr>::zero()];
+    state.extend_from_slice(inputs);
 
     let all_rounds = full_rounds + partial_rounds;
     let half_rounds = full_rounds / 2;
@@ -34,6 +45,18 @@ pub fn poseidon2_var(a: FpVar<Fr>, b: FpVar<Fr>) -> Result<FpVar<Fr>, SynthesisE
     }
 
     Ok(state[0].clone())
+}
+
+pub fn poseidon2_var(a: FpVar<Fr>, b: FpVar<Fr>) -> Result<FpVar<Fr>, SynthesisError> {
+    poseidon_var(&[a, b])
+}
+
+pub fn poseidon3_var(
+    a: FpVar<Fr>,
+    b: FpVar<Fr>,
+    c: FpVar<Fr>,
+) -> Result<FpVar<Fr>, SynthesisError> {
+    poseidon_var(&[a, b, c])
 }
 
 fn apply_ark(state: &mut [FpVar<Fr>], ark: &[Fr], round: usize, width: usize) {
@@ -76,7 +99,6 @@ mod tests {
 
     #[test]
     fn poseidon_var_matches_native() {
-        use crate::burn::poseidon2;
         use ark_relations::gr1cs::ConstraintSystem;
 
         let cs = ConstraintSystem::<Fr>::new_ref();

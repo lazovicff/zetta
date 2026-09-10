@@ -10,9 +10,9 @@ use ark_bn254::Fr;
 use ark_ff::{BigInteger, PrimeField, Zero};
 use folding_schemes::frontend::FCircuit;
 
-use crate::burn::{address_to_fr, poseidon2};
 use crate::tree::{HashChain, MerkleTree};
 use crate::zkp::{RootTransitionCircuit, RootTransitionWitness, prove_root_transition};
+use crate::{burn::address_to_fr, zkp::poseidon2};
 
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 value);

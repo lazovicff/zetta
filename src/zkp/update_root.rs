@@ -1,14 +1,11 @@
 use std::{borrow::Borrow, marker::PhantomData};
 
 use ark_bn254::Fr;
-use ark_crypto_primitives::crh::sha256::constraints::Sha256Gadget;
 use ark_ff::Zero;
 use ark_r1cs_std::{
     alloc::{AllocVar, AllocationMode},
     eq::EqGadget,
     fields::{FieldVar, fp::FpVar},
-    prelude::{Boolean, ToBitsGadget, ToBytesGadget},
-    uint8::UInt8,
 };
 use ark_relations::gr1cs::{ConstraintSystemRef, Namespace, SynthesisError};
 use folding_schemes::{Error, frontend::FCircuit};
@@ -20,38 +17,7 @@ pub fn hash_chain_step_var(
     to: FpVar<Fr>,
     value: FpVar<Fr>,
 ) -> Result<FpVar<Fr>, SynthesisError> {
-    let mut prev_bytes = prev.to_bytes_le()?; // 32 bytes LE
-    prev_bytes.reverse(); // -> BE
-
-    let mut to_bytes = to.to_bytes_le()?; // 32 bytes LE
-    to_bytes.reverse(); // -> BE
-    let to_20 = to_bytes[12..32].to_vec(); // low 20 bytes = address
-
-    let mut value_bytes = value.to_bytes_le()?; // 32 bytes LE
-    value_bytes.reverse(); // -> BE
-
-    let mut input = Vec::with_capacity(84);
-    input.extend(prev_bytes);
-    input.extend(to_20);
-    input.extend(value_bytes);
-
-    let digest = Sha256Gadget::<Fr>::digest(&input)?; // 32 bytes
-    let mut bytes = digest.0;
-
-    // trim246: clear top 10 bits
-    bytes[0] = UInt8::constant(0);
-    bytes[1] = bytes[1].clone() & UInt8::constant(0x3f);
-
-    // byte[0] is 0; convert low 31 bytes (248 bits) to Fr
-    bytes_to_fp_var(&bytes[1..])
-}
-
-fn bytes_to_fp_var(bytes: &[UInt8<Fr>]) -> Result<FpVar<Fr>, SynthesisError> {
-    let mut bits = Vec::with_capacity(bytes.len() * 8);
-    for byte in bytes.iter().rev() {
-        bits.extend(byte.to_bits_le()?);
-    }
-    Boolean::le_bits_to_fp(&bits)
+    crate::zkp::poseidon3_var(prev, to, value)
 }
 
 /// In-circuit Merkle root: hash `leaf` up `siblings` (depth 32), using `index` bits.
@@ -182,6 +148,8 @@ mod tests {
     use ark_ff::One;
     use ark_r1cs_std::GR1CSVar;
 
+    use crate::zkp::poseidon2;
+
     use super::*;
 
     #[test]
@@ -236,9 +204,9 @@ mod tests {
         let mut idx = index;
         for &sibling in siblings {
             h = if idx & 1 == 0 {
-                crate::burn::poseidon2(h, sibling).unwrap()
+                poseidon2(h, sibling).unwrap()
             } else {
-                crate::burn::poseidon2(sibling, h).unwrap()
+                poseidon2(sibling, h).unwrap()
             };
             idx >>= 1;
         }
@@ -247,7 +215,7 @@ mod tests {
 
     #[test]
     fn root_transition_circuit_matches_native() {
-        use crate::burn::{address_to_fr, poseidon2};
+        use crate::burn::address_to_fr;
         use crate::tree::{MerkleTree, hash_chain_step};
         use ark_relations::gr1cs::ConstraintSystem;
 

@@ -1,9 +1,9 @@
 //! Poseidon Merkle tree + on-chain hash-chain mirror (Phase B).
 
 use ark_bn254::Fr;
-use ark_ff::{BigInteger, PrimeField, Zero};
+use ark_ff::Zero;
 
-use crate::burn::poseidon2;
+use crate::zkp::{poseidon2, poseidon3};
 
 /// Append-only Poseidon binary Merkle tree.
 pub struct MerkleTree {
@@ -120,18 +120,9 @@ fn next_level(level: &[Fr], zero: Fr) -> Vec<Fr> {
     next
 }
 
-/// One hash-chain step: `trim246(sha256(prev_be32 ‖ to_20 ‖ value_be32))`.
+/// One hash-chain step: `poseidon3(prev, address_to_fr(to), value)`.
 pub fn hash_chain_step(prev: Fr, to: [u8; 20], value: Fr) -> Fr {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(prev.into_bigint().to_bytes_be());
-    hasher.update(to);
-    hasher.update(value.into_bigint().to_bytes_be());
-    let h: [u8; 32] = hasher.finalize().into();
-    let mut b = h;
-    b[0] = 0;
-    b[1] &= 0x3f;
-    Fr::from_be_bytes_mod_order(&b)
+    poseidon3(prev, crate::burn::address_to_fr(to), value).expect("poseidon")
 }
 
 /// Off-chain mirror of the on-chain `burnHashChain`.
@@ -219,12 +210,6 @@ mod tests {
         chain2.apply([0x11u8; 20], Fr::from(100u64));
         chain2.apply([0x22u8; 20], Fr::from(200u64));
         assert_eq!(chain2.state(), chain.state());
-        // in range < 2^246
-        for s in [s0, s1] {
-            let bytes = s.into_bigint().to_bytes_be();
-            assert_eq!(bytes[0], 0);
-            assert_eq!(bytes[1] & 0xc0, 0);
-        }
         // different input -> different state
         assert_ne!(s0, s1);
     }

@@ -10,9 +10,12 @@ use ark_bn254::Fr;
 use ark_ff::{PrimeField, Zero};
 use folding_schemes::frontend::FCircuit;
 
-use crate::burn::{address_to_fr, poseidon2, recipient, trim_to_160};
 use crate::tree::MerkleTree;
 use crate::zkp::{WithdrawCircuit, WithdrawParams, WithdrawWitness, prove_withdraw};
+use crate::{
+    burn::{address_to_fr, recipient, trim_to_160},
+    zkp::poseidon2,
+};
 
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 value);

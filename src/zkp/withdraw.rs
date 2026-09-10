@@ -154,11 +154,13 @@ mod tests {
     use ark_ff::One;
     use ark_r1cs_std::GR1CSVar;
 
+    use crate::zkp::poseidon2;
+
     use super::*;
 
     #[test]
     fn withdraw_circuit_matches_native() {
-        use crate::burn::{find_burn_address, poseidon2, recipient};
+        use crate::burn::{find_burn_address, recipient};
         use crate::tree::MerkleTree;
         use ark_relations::gr1cs::ConstraintSystem;
 

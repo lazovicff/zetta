@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn root_transition_full_pipeline() -> Result<(), Box<dyn std::error::Error>> {
-        use crate::burn::{address_to_fr, poseidon2};
+        use crate::burn::address_to_fr;
         use crate::tree::MerkleTree;
         use solidity_verifiers::evm::{Evm, compile_solidity};
 
@@ -252,7 +252,7 @@ mod tests {
 
     #[test]
     fn withdraw_full_pipeline() -> Result<(), Box<dyn std::error::Error>> {
-        use crate::burn::{find_burn_address, poseidon2, recipient};
+        use crate::burn::{find_burn_address, recipient};
         use crate::tree::MerkleTree;
         use solidity_verifiers::evm::{Evm, compile_solidity};
 

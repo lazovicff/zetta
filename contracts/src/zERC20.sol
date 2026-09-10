@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {PoseidonT4} from "poseidon-solidity/PoseidonT4.sol";
 
 /// @notice ERC-20 with a burn hash chain (zERC20-style on-chain commitment).
 /// Every transfer (from != address(0)) extends the chain:
@@ -12,7 +13,6 @@ contract zERC20 is ERC20 {
     uint256 public burnIndex;
 
     uint256 private constant VALUE_LIMIT = 1 << 248;
-    uint256 private constant HASH_CHAIN_MASK = (1 << 246) - 1;
 
     address public minter;
 
@@ -34,8 +34,7 @@ contract zERC20 is ERC20 {
         require(value < VALUE_LIMIT, "value too large");
         super._update(from, to, value);
         if (from != address(0)) {
-            burnHashChain =
-                uint256(sha256(abi.encodePacked(burnHashChain, to, value))) & HASH_CHAIN_MASK;
+            burnHashChain = PoseidonT4.hash([burnHashChain, uint256(uint160(to)), value]);
             burnIndex += 1;
         }
     }
