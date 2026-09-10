@@ -152,7 +152,7 @@ pub async fn run(
 
     let z_0 = vec![Fr::zero(), Fr::zero(), transfer_root, recipient];
     let circuit = WithdrawCircuit::new(WithdrawParams { pow_bits: 20 })?;
-    let (calldata, _solidity_code) = prove_withdraw(circuit, z_0, witnesses)?;
+    let calldata = prove_withdraw(circuit, z_0, witnesses)?;
 
     let proof_arr = decode_opaque_proof(&calldata);
 

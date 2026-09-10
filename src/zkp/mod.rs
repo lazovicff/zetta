@@ -67,21 +67,21 @@ macro_rules! cached_params {
 
             if pp_path.exists() && vp_path.exists() && dpp_path.exists() && dvp_path.exists() {
                 let nova_pp =
-                    <$n as FoldingScheme<G1, G2, $fc>>::ProverParam::deserialize_compressed(
+                    <$n as FoldingScheme<G1, G2, $fc>>::ProverParam::deserialize_uncompressed(
                         &mut std::fs::read(&pp_path)?.as_slice(),
                     )?;
                 let nova_vp = <$n as FoldingScheme<G1, G2, $fc>>::vp_deserialize_with_mode(
                     &mut std::fs::read(&vp_path)?.as_slice(),
-                    ark_serialize::Compress::Yes,
-                    ark_serialize::Validate::Yes,
+                    ark_serialize::Compress::No,
+                    ark_serialize::Validate::No,
                     $fc_params.clone(),
                 )?;
                 let decider_pp =
-                    <$d as Decider<G1, G2, $fc, $n>>::ProverParam::deserialize_compressed(
+                    <$d as Decider<G1, G2, $fc, $n>>::ProverParam::deserialize_uncompressed(
                         &mut std::fs::read(&dpp_path)?.as_slice(),
                     )?;
                 let decider_vp =
-                    <$d as Decider<G1, G2, $fc, $n>>::VerifierParam::deserialize_compressed(
+                    <$d as Decider<G1, G2, $fc, $n>>::VerifierParam::deserialize_uncompressed(
                         &mut std::fs::read(&dvp_path)?.as_slice(),
                     )?;
                 Ok((nova_pp, nova_vp, decider_pp, decider_vp))
@@ -99,16 +99,16 @@ macro_rules! cached_params {
                 )?;
 
                 let mut buf = vec![];
-                nova_params.0.serialize_compressed(&mut buf)?;
+                nova_params.0.serialize_uncompressed(&mut buf)?;
                 std::fs::write(&pp_path, buf)?;
                 let mut buf = vec![];
-                nova_params.1.serialize_compressed(&mut buf)?;
+                nova_params.1.serialize_uncompressed(&mut buf)?;
                 std::fs::write(&vp_path, buf)?;
                 let mut buf = vec![];
-                decider_pp.serialize_compressed(&mut buf)?;
+                decider_pp.serialize_uncompressed(&mut buf)?;
                 std::fs::write(&dpp_path, buf)?;
                 let mut buf = vec![];
-                decider_vp.serialize_compressed(&mut buf)?;
+                decider_vp.serialize_uncompressed(&mut buf)?;
                 std::fs::write(&dvp_path, buf)?;
 
                 Ok((nova_params.0, nova_params.1, decider_pp, decider_vp))
@@ -140,21 +140,51 @@ macro_rules! prove_for {
             f_circuit: $fc,
             z_0: Vec<Fr>,
             external_inputs: Vec<<$fc as FCircuit<Fr>>::ExternalInputs>,
-        ) -> Result<(Vec<u8>, String), Box<dyn std::error::Error>> {
-            let (nova_pp, nova_vp, decider_pp, decider_vp) = $loader()?;
+        ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+            use std::time::Instant;
+
+            let load_start = Instant::now();
+            let (nova_pp, nova_vp, decider_pp, _) = $loader()?;
+            eprintln!(
+                "[{}] load_params={:?}",
+                stringify!($name),
+                load_start.elapsed()
+            );
             let nova_params = (nova_pp, nova_vp);
 
             let rng = ark_std::rand::rngs::OsRng;
 
+            let init_start = Instant::now();
             let mut nova =
                 <$n as FoldingScheme<G1, G2, $fc>>::init(&nova_params, f_circuit.clone(), z_0)?;
+            eprintln!("[{}] init={:?}", stringify!($name), init_start.elapsed());
 
+            let n_steps = external_inputs.len();
+            let fold_start = Instant::now();
             for ext in external_inputs {
                 nova.prove_step(rng, ext, None)?;
             }
+            let fold_elapsed = fold_start.elapsed();
 
+            let decider_start = Instant::now();
             let proof = <$d as Decider<G1, G2, $fc, $n>>::prove(rng, decider_pp, nova.clone())?;
+            let decider_elapsed = decider_start.elapsed();
 
+            let avg = if n_steps > 0 {
+                format!("{:?}/step", fold_elapsed / n_steps as u32)
+            } else {
+                "n/a".to_string()
+            };
+            eprintln!(
+                "[{}] steps={} fold={:?} ({}) decider={:?}",
+                stringify!($name),
+                n_steps,
+                fold_elapsed,
+                avg,
+                decider_elapsed,
+            );
+
+            let cal_start = Instant::now();
             let calldata = prepare_calldata_for_nova_cyclefold_verifier(
                 NovaVerificationMode::Opaque,
                 nova.i,
@@ -164,13 +194,13 @@ macro_rules! prove_for {
                 &nova.u_i,
                 &proof,
             )?;
+            eprintln!(
+                "[{}] prepare_calldata={:?}",
+                stringify!($name),
+                cal_start.elapsed()
+            );
 
-            let nova_cyclefold_vk =
-                NovaCycleFoldVerifierKey::from((decider_vp, f_circuit.state_len()));
-            let decider_solidity_code =
-                get_decider_template_for_cyclefold_decider(nova_cyclefold_vk);
-
-            Ok((calldata, decider_solidity_code))
+            Ok(calldata)
         }
     };
 }
@@ -239,7 +269,8 @@ mod tests {
         let z_0 = vec![Fr::zero(), Fr::zero(), initial_root];
 
         let circuit = RootTransitionCircuit::new(()).unwrap();
-        let (calldata, solidity_code) = prove_root_transition(circuit, z_0, witnesses)?;
+        let calldata = prove_root_transition(circuit, z_0, witnesses)?;
+        let solidity_code = gen_root_transition_verifier()?;
 
         let bytecode = compile_solidity(&solidity_code, "NovaDecider");
         let mut evm = Evm::default();
@@ -282,7 +313,8 @@ mod tests {
         let z_0 = vec![Fr::zero(), Fr::zero(), transfer_root, recipient];
 
         let circuit = WithdrawCircuit::new(WithdrawParams { pow_bits }).unwrap();
-        let (calldata, solidity_code) = prove_withdraw(circuit, z_0, vec![witness])?;
+        let calldata = prove_withdraw(circuit, z_0, vec![witness])?;
+        let solidity_code = gen_withdraw_verifier()?;
 
         let bytecode = compile_solidity(&solidity_code, "NovaDecider");
         let mut evm = Evm::default();

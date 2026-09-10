@@ -137,7 +137,7 @@ pub async fn run(
     let z_0 = vec![Fr::zero(), Fr::zero(), initial_root];
 
     let circuit = RootTransitionCircuit::new(())?;
-    let (calldata, _solidity_code) = prove_root_transition(circuit, z_0, witnesses)?;
+    let calldata = prove_root_transition(circuit, z_0, witnesses)?;
 
     let proof_arr = decode_opaque_proof(&calldata);
 

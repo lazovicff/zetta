@@ -26,18 +26,21 @@ burn() { # runs one burn and prints the generated secret
     | tee /dev/stderr | awk -F'= *' '/^secret/ {print $2}'
 }
 
+measure() { # measure <label> <cmd...>
+  local label="$1"; shift
+  TIMEFORMAT="== $label: %3R s"
+  time "$@"
+}
+
 echo "== burn #1"
 S1=$(burn); : "${S1:?no secret printed}"
 echo "== burn #2"
 S2=$(burn); : "${S2:?no secret printed}"
 
-echo "== update-root (first run generates root-transition params — several minutes)"
-cargo run --release -- update-root \
+measure "update-root" cargo run --release -- update-root \
   --rpc-url $RPC --token "$TOKEN" --verifier "$VERIFIER" --private-key $PK
 
-echo "== withdraw both burns in one batch proof"
-echo "   (the on-chain decider requires >= 2 folded steps; single receipts are rejected)"
-cargo run --release -- withdraw \
+measure "withdraw" cargo run --release -- withdraw \
   --rpc-url $RPC --token "$TOKEN" --verifier "$VERIFIER" \
   --recipient "$RECIPIENT" --tweak $TWEAK \
   --secret "$S1,$S2" --value "$AMOUNT,$AMOUNT" --private-key $PK
