@@ -4,5 +4,23 @@
       "name": "v5.7.0",
       "rev": "cab19933c33c2ad1d4c7a84864a3601dddfd16f3"
     }
+  },
+  "contracts/lib/v3-core": {
+    "tag": {
+      "name": "v1.0.0",
+      "rev": "e3589b192d0be27e100cd0daaf6c97204fdb1899"
+    }
+  },
+  "contracts/lib/v3-periphery": {
+    "tag": {
+      "name": "v1.3.0",
+      "rev": "80f26c86c57b8a5e4b913f42844d4c8bd274d058"
+    }
+  },
+  "contracts/lib/v3-staker": {
+    "tag": {
+      "name": "v1.0.2",
+      "rev": "bc460c03c431431d5b057dad37e6ecc1b3d14f9b"
+    }
   }
 }

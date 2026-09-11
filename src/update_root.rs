@@ -76,8 +76,8 @@ pub async fn run(
     for log in &logs {
         let decoded = log.log_decode::<Transfer>()?;
         let d = decoded.data();
-        if d.from.is_zero() {
-            continue; // mint — excluded from tree
+        if d.from.is_zero() || d.to.is_zero() {
+            continue; // mint/burn — excluded from tree
         }
         let to_bytes: [u8; 20] = d.to.into_array();
         let value_fr = u256_to_fr(d.value);

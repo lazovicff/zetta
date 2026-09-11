@@ -61,8 +61,8 @@ pub async fn run(ws_url: &str, token: Address) -> Result<(), Box<dyn std::error:
     while let Some(log) = stream.next().await {
         let decoded = log.log_decode::<Transfer>()?;
         let d = decoded.data();
-        if d.from.is_zero() {
-            continue; // mint — excluded from tree
+        if d.from.is_zero() || d.to.is_zero() {
+            continue; // mint/burn — excluded from tree
         }
         indexer.apply(d.to, d.value);
         println!(

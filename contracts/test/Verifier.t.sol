@@ -48,7 +48,7 @@ contract VerifierTest is Test {
         rootV = new MockRootVerifier();
         withdrawV = new MockWithdrawVerifier();
         verifier.setVerifiers(rootV, withdrawV);
-        token.setMinter(address(verifier));
+        token.setVerifier(address(verifier));
     }
 
     function _updateRoot(uint256 newRoot) internal {

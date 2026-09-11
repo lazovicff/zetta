@@ -56,4 +56,23 @@ contract zERC20Test is Test {
         assertEq(t.burnHashChain(), 9762264803104824420061871697878501718339444527684854672502945231577261824673);
     }
 
+    function test_burn_does_not_update_hash_chain() public {
+        uint256 before = token.burnHashChain();
+        uint256 idxBefore = token.burnIndex();
+        token.burn(alice, 50 ether);
+        assertEq(token.burnHashChain(), before);
+        assertEq(token.burnIndex(), idxBefore);
+    }
+
+    function test_teleport_mints() public {
+        uint256 balBefore = token.balanceOf(bob);
+        token.teleport(bob, 100 ether);
+        assertEq(token.balanceOf(bob), balBefore + 100 ether);
+    }
+
+    function test_teleport_only_verifier() public {
+        vm.prank(alice);
+        vm.expectRevert("not verifier");
+        token.teleport(bob, 100 ether);
+    }
 }

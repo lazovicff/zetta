@@ -4,3 +4,6 @@ forge-std/=contracts/lib/openzeppelin-contracts/lib/forge-std/src/
 halmos-cheatcodes/=contracts/lib/openzeppelin-contracts/lib/halmos-cheatcodes/src/
 openzeppelin-contracts/=contracts/lib/openzeppelin-contracts/
 poseidon-solidity/=contracts/lib/poseidon-solidity/
+@uniswap/v3-core/=contracts/lib/v3-core/
+@uniswap/v3-periphery/=contracts/lib/v3-periphery/
+@uniswap/v3-staker/=contracts/lib/v3-staker/

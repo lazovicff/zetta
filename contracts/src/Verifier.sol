@@ -88,7 +88,7 @@ contract Verifier {
         require(delta > 0, "nothing to withdraw");
         totalWithdrawn[recipient] = sum;
 
-        token.mint(addr, delta);
+        token.teleport(addr, delta);
     }
 
     function computeRecipient(uint256 chainId, address addr, bytes32 tweak)

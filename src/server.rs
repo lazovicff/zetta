@@ -74,7 +74,7 @@ async fn fetch_transfers(
     for log in &logs {
         let decoded = log.log_decode::<Transfer>()?;
         let d = decoded.data();
-        if d.from.is_zero() {
+        if d.from.is_zero() || d.to.is_zero() {
             continue;
         }
         transfers.push((d.to.into_array(), u256_to_fr(d.value)));

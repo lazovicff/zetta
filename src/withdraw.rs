@@ -114,7 +114,7 @@ pub async fn run(
     for log in &logs {
         let decoded = log.log_decode::<Transfer>()?;
         let d = decoded.data();
-        if d.from.is_zero() {
+        if d.from.is_zero() || d.to.is_zero() {
             continue;
         }
         let to_bytes: [u8; 20] = d.to.into_array();
