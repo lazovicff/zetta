@@ -9,9 +9,9 @@ interface IRewardDistributor {
     function notifyRewardAmount(uint256 reward) external;
 }
 
-/// @notice Treasury vault: wraps DAI 1:1 into zDAI, holds sDAI as yield-bearing backing,
-/// and sweeps the DSR yield to stakers (80%) and the protocol (20%).
-contract Vault {
+/// @notice DAI treasury vault: wraps DAI 1:1 into zDAI, holds sDAI as yield-bearing backing,
+/// and sweeps the DSR yield to stakers and (optionally) the protocol.
+contract DAIVault {
     IERC20 public immutable dai;
     IERC4626 public immutable sdai;
     zERC20 public immutable token;
@@ -20,7 +20,8 @@ contract Vault {
     address public yieldRecipient;        // RewardDistributor (stakers)
     address public protocolFeeRecipient;  // protocol treasury
 
-    uint256 public protocolFeeBps = 2000; // 20% = 2000 bps
+    uint256 public constant MAX_PROTOCOL_FEE_BPS = 2000; // 20%
+    uint256 public protocolFeeBps; // 0 by default (no protocol fee)
 
     uint256 public totalMinted; // cumulative zDAI minted via wrap
     uint256 public totalBurned; // cumulative zDAI burned via unwrap
@@ -48,7 +49,7 @@ contract Vault {
     }
 
     function setProtocolFeeBps(uint256 bps) external onlyOwner {
-        require(bps <= 10000, "too high");
+        require(bps <= MAX_PROTOCOL_FEE_BPS, "too high");
         protocolFeeBps = bps;
     }
 
@@ -68,10 +69,9 @@ contract Vault {
         totalBurned += amount;
     }
 
-    /// Sweep accumulated DSR yield: 80% to stakers, 20% to protocol. Permissionless.
+    /// Sweep accumulated DSR yield to stakers, minus the protocol fee (if any). Permissionless.
     function sweepYield() external {
         require(yieldRecipient != address(0), "no recipient");
-        require(protocolFeeRecipient != address(0), "no protocol recipient");
 
         uint256 sdaiValue = sdai.previewRedeem(sdai.balanceOf(address(this)));
         uint256 netDeposited = totalMinted - totalBurned;
@@ -88,6 +88,7 @@ contract Vault {
         IRewardDistributor(yieldRecipient).notifyRewardAmount(userShare);
 
         if (protocolShare > 0) {
+            require(protocolFeeRecipient != address(0), "no protocol recipient");
             sdai.withdraw(protocolShare, protocolFeeRecipient, address(this));
         }
     }
