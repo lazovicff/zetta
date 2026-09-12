@@ -5,6 +5,9 @@ use ark_ff::Zero;
 
 use crate::zkp::{poseidon2, poseidon3};
 
+pub const TREE_DEPTH: usize = 18;
+pub const TREE_CAPACITY: usize = 1 << TREE_DEPTH; // 262144
+
 /// Append-only Poseidon binary Merkle tree.
 pub struct MerkleTree {
     depth: usize,
@@ -216,7 +219,7 @@ mod tests {
 
     #[test]
     fn print_constants() {
-        let tree = MerkleTree::new(32);
+        let tree = MerkleTree::new(TREE_DEPTH);
         println!("INITIAL_ROOT = {}", tree.root());
         let hc = hash_chain_step(Fr::zero(), [0x01u8; 20], Fr::from(100u64));
         println!("CANONICAL_HASH_CHAIN = {}", hc);

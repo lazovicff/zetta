@@ -13,7 +13,7 @@ import {MockSDAI} from "../mocks/MockSDAI.sol";
 
 contract Deploy is Script {
     uint256 constant INITIAL_ROOT =
-        7694308195910501081009121293114024464085863242234210875116972222894508088593;
+        10941962436777715901943463195175331263348098796018438960955633645115732864202;
 
     function run() external {
         vm.startBroadcast();

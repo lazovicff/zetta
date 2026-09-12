@@ -240,6 +240,8 @@ mod tests {
     use ark_bn254::Fr;
     use ark_ff::Zero;
 
+    use crate::tree::TREE_DEPTH;
+
     use super::*;
 
     #[test]
@@ -250,11 +252,11 @@ mod tests {
 
         let transfers = [([0x01u8; 20], 100u64), ([0x02u8; 20], 200u64)];
 
-        let mut tree = MerkleTree::new(32);
+        let mut tree = MerkleTree::new(TREE_DEPTH);
         let mut witnesses = Vec::new();
         for (i, (to, val)) in transfers.iter().enumerate() {
             let proof = tree.proof_for_empty(i);
-            let mut merkle_path = [Fr::zero(); 32];
+            let mut merkle_path = [Fr::zero(); TREE_DEPTH];
             merkle_path.copy_from_slice(&proof);
             witnesses.push(RootTransitionWitness {
                 to: address_to_fr(*to),
@@ -296,12 +298,12 @@ mod tests {
         let burn_addr = crate::burn::address_to_fr(crate::burn::trim_to_160(burn));
         let leaf = poseidon2(burn_addr, value).unwrap();
 
-        let mut tree = MerkleTree::new(32);
+        let mut tree = MerkleTree::new(TREE_DEPTH);
         tree.insert(leaf);
         let transfer_root = tree.root();
         let proof = tree.proof(0);
 
-        let mut merkle_path = [Fr::zero(); 32];
+        let mut merkle_path = [Fr::zero(); TREE_DEPTH];
         merkle_path.copy_from_slice(&proof);
         let witness = WithdrawWitness {
             secret,

@@ -1,3 +1,4 @@
+use crate::tree::TREE_DEPTH;
 use ark_bn254::Fr;
 use ark_ff::Zero;
 use ark_r1cs_std::{
@@ -22,7 +23,7 @@ pub struct WithdrawWitness {
     pub secret: Fr,
     pub value: Fr,
     pub index: Fr,
-    pub merkle_path: [Fr; 32],
+    pub merkle_path: [Fr; TREE_DEPTH],
 }
 
 impl Default for WithdrawWitness {
@@ -31,7 +32,7 @@ impl Default for WithdrawWitness {
             secret: Fr::zero(),
             value: Fr::zero(),
             index: Fr::zero(),
-            merkle_path: [Fr::zero(); 32],
+            merkle_path: [Fr::zero(); TREE_DEPTH],
         }
     }
 }
@@ -41,7 +42,7 @@ pub struct WithdrawWitnessVar {
     pub secret: FpVar<Fr>,
     pub value: FpVar<Fr>,
     pub index: FpVar<Fr>,
-    pub merkle_path: [FpVar<Fr>; 32],
+    pub merkle_path: [FpVar<Fr>; TREE_DEPTH],
 }
 
 impl AllocVar<WithdrawWitness, Fr> for WithdrawWitnessVar {
@@ -58,7 +59,7 @@ impl AllocVar<WithdrawWitness, Fr> for WithdrawWitnessVar {
             secret: FpVar::<Fr>::new_variable(cs.clone(), || Ok(w.secret), mode)?,
             value: FpVar::<Fr>::new_variable(cs.clone(), || Ok(w.value), mode)?,
             index: FpVar::<Fr>::new_variable(cs.clone(), || Ok(w.index), mode)?,
-            merkle_path: <[FpVar<Fr>; 32] as AllocVar<[Fr; 32], Fr>>::new_variable(
+            merkle_path: <[FpVar<Fr>; TREE_DEPTH] as AllocVar<[Fr; TREE_DEPTH], Fr>>::new_variable(
                 cs.clone(),
                 || Ok(w.merkle_path),
                 mode,
@@ -180,7 +181,7 @@ mod tests {
 
         let z_i = vec![Fr::zero(), Fr::zero(), transfer_root, recipient];
 
-        let mut merkle_path = [Fr::zero(); 32];
+        let mut merkle_path = [Fr::zero(); TREE_DEPTH];
         merkle_path.copy_from_slice(&proof);
         let witness = WithdrawWitness {
             secret,

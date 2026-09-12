@@ -4,12 +4,13 @@ use ark_bn254::Fr;
 
 use crate::burn::{recipient, trim_to_160};
 use crate::config::Config;
-use crate::tree::{HashChain, MerkleTree};
+use crate::tree::{HashChain, MerkleTree, TREE_DEPTH};
 use crate::zkp::{RootTransitionWitness, poseidon2};
 
 pub struct State {
-    pub tree: MerkleTree,
-    pub chain: HashChain,
+    pub tree: MerkleTree,                 // current tree (being built)
+    pub finalized_trees: Vec<MerkleTree>, // finalized trees (for Merkle proofs)
+    pub chain: HashChain,                 // global hash chain
     pub chain_id: u64,
     pub exchange_addr: [u8; 20],
     pub tweak: [u8; 32],
@@ -17,8 +18,8 @@ pub struct State {
     pub burn_addresses: Vec<[u8; 20]>,
     pub secret_by_addr: HashMap<[u8; 20], Fr>,
     pub next_index: usize,
-    /// burn_address -> (value, tree_index)
-    pub deposits: HashMap<[u8; 20], (Fr, usize)>,
+    /// burn_address -> (value, rootIndex, treeIndex)
+    pub deposits: HashMap<[u8; 20], (Fr, usize, usize)>,
     pub pending: Option<(Vec<Fr>, Vec<RootTransitionWitness>)>,
 }
 
@@ -38,7 +39,8 @@ impl State {
             secret_by_addr.insert(addr, secret);
         }
         Ok(Self {
-            tree: MerkleTree::new(32),
+            tree: MerkleTree::new(TREE_DEPTH),
+            finalized_trees: Vec::new(),
             chain: HashChain::new(),
             chain_id,
             exchange_addr,

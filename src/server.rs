@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -19,6 +20,7 @@ use folding_schemes::frontend::FCircuit;
 use crate::burn::{address_to_fr, recipient};
 use crate::config::Config;
 use crate::state::State;
+use crate::tree::{MerkleTree, TREE_CAPACITY, TREE_DEPTH};
 use crate::zkp::poseidon2;
 use crate::zkp::{
     RootTransitionCircuit, RootTransitionWitness, WithdrawCircuit, WithdrawParams, WithdrawWitness,
@@ -33,8 +35,10 @@ sol! {
     #[sol(rpc)]
     interface IVerifier {
         function updateRoot(uint256[32] proof) external;
-        function withdraw(uint256 chainId, address addr, bytes32 tweak, uint256[34] proof) external;
+        function withdraw(uint256 chainId, address addr, bytes32 tweak, uint256 rootIndex, uint256[34] proof) external;
         function transferIndex() external view returns (uint256);
+        function transferRootsLength() external view returns (uint256);
+        function transferRoots(uint256 index) external view returns (uint256);
     }
 
 }
@@ -92,7 +96,7 @@ fn apply_transfer(
     let index = s.tree.len();
     let witness = if build_witness {
         let proof = s.tree.proof_for_empty(index);
-        let mut merkle_path = [Fr::zero(); 32];
+        let mut merkle_path = [Fr::zero(); TREE_DEPTH];
         merkle_path.copy_from_slice(&proof);
         Some(RootTransitionWitness {
             to: to_fr,
@@ -106,7 +110,8 @@ fn apply_transfer(
     s.tree.insert(leaf);
     s.chain.apply(to, value);
     if s.secret_by_addr.contains_key(&to) {
-        s.deposits.insert(to, (value, index));
+        let root_index = s.finalized_trees.len();
+        s.deposits.insert(to, (value, root_index, index));
     }
     Ok(witness)
 }
@@ -160,45 +165,6 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-async fn catch_up(
-    state: &SharedState,
-    provider: &impl Provider,
-    config: &Config,
-) -> Result<u64, Box<dyn std::error::Error>> {
-    let on_chain_index: u64 = {
-        let contract = IVerifier::new(config.verifier, provider);
-        contract.transferIndex().call().await?.try_into().unwrap()
-    };
-    let latest = provider.get_block_number().await?;
-    let transfers = fetch_transfers(provider, config.token, config.last_block + 1, latest).await?;
-
-    let mut witnesses = Vec::new();
-    let mut z_0 = vec![Fr::zero(), Fr::zero(), Fr::zero()];
-    let mut in_new = false;
-    {
-        let mut s = state.lock().unwrap();
-        for (to, value) in transfers {
-            if s.chain.index() < on_chain_index {
-                apply_transfer(&mut s, to, value, false)?;
-            } else {
-                if !in_new {
-                    z_0 = vec![Fr::from(s.chain.index()), s.chain.state(), s.tree.root()];
-                    in_new = true;
-                }
-                if let Some(w) = apply_transfer(&mut s, to, value, true)? {
-                    witnesses.push(w);
-                }
-            }
-        }
-        if !witnesses.is_empty() {
-            s.pending = Some((z_0, witnesses));
-        }
-    }
-
-    do_update_root(state, provider, config).await?;
-    Ok(latest)
-}
-
 async fn indexer_step(
     state: &SharedState,
     provider: &impl Provider,
@@ -212,17 +178,21 @@ async fn indexer_step(
     let transfers = fetch_transfers(provider, config.token, last_block + 1, latest).await?;
 
     let mut witnesses = Vec::new();
-    let z_0;
     {
         let mut s = state.lock().unwrap();
-        z_0 = vec![Fr::from(s.chain.index()), s.chain.state(), s.tree.root()];
         for (to, value) in transfers {
             if let Some(w) = apply_transfer(&mut s, to, value, true)? {
                 witnesses.push(w);
             }
         }
         if !witnesses.is_empty() {
-            s.pending = Some((z_0, witnesses));
+            match &mut s.pending {
+                Some((_, existing)) => existing.extend(witnesses),
+                None => {
+                    let z_0 = vec![Fr::zero(), s.chain.state(), s.tree.root()];
+                    s.pending = Some((z_0, witnesses));
+                }
+            }
         }
     }
 
@@ -234,7 +204,7 @@ async fn deposits(AxumState(state): AxumState<SharedState>) -> impl IntoResponse
     let list: Vec<_> = s
         .deposits
         .iter()
-        .map(|(addr, (value, idx))| {
+        .map(|(addr, (value, _root_index, idx))| {
             serde_json::json!({
                 "address": format!("0x{}", hex::encode(addr)),
                 "value": value.to_string(),
@@ -252,10 +222,10 @@ async fn do_update_root(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (z_0, witnesses) = {
         let mut s = state.lock().unwrap();
-        if s.pending.as_ref().map(|p| p.1.len()).unwrap_or(0) < 2 {
-            return Ok(());
+        if s.tree.len() < TREE_CAPACITY {
+            return Ok(()); // not full yet
         }
-        s.pending.take().unwrap()
+        s.pending.take().expect("pending witnesses")
     };
 
     let circuit = RootTransitionCircuit::new(())?;
@@ -266,6 +236,14 @@ async fn do_update_root(
     let tx = contract.updateRoot(proof_arr).send().await?;
     let receipt = tx.get_receipt().await?;
     println!("updateRoot tx = {}", receipt.transaction_hash);
+
+    // Move the full tree into finalized_trees and start a fresh one.
+    {
+        let mut s = state.lock().unwrap();
+        let finalized = std::mem::replace(&mut s.tree, MerkleTree::new(TREE_DEPTH));
+        s.finalized_trees.push(finalized);
+        s.pending = None;
+    }
     Ok(())
 }
 
@@ -274,64 +252,75 @@ async fn do_withdraw(
     provider: &impl Provider,
     config: &Config,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // collect deposits (brief lock)
     let (tweak, exchange_addr, chain_id, deposits) = {
         let s = state.lock().unwrap();
         (s.tweak, s.exchange_addr, s.chain_id, s.deposits.clone())
     };
-    if deposits.len() < 2 {
-        return Ok(()); // decider requires >= 2 folded steps
-    }
 
     let recipient = recipient(chain_id, exchange_addr, tweak);
-    let transfer_root = state.lock().unwrap().tree.root();
 
-    // build witnesses in increasing tree-index order
-    let mut by_index: Vec<(usize, Fr, Fr)> = Vec::with_capacity(deposits.len());
+    // Group deposits by rootIndex.
+    let mut by_tree: HashMap<usize, Vec<(usize, Fr, Fr)>> = HashMap::new();
     {
         let s = state.lock().unwrap();
-        for (addr, (value, idx)) in &deposits {
+        for (addr, (value, root_index, tree_index)) in &deposits {
             let secret = s.secret_by_addr[addr];
-            by_index.push((*idx, secret, *value));
-        }
-    }
-    by_index.sort_by_key(|&(idx, _, _)| idx);
-
-    let mut witnesses = Vec::with_capacity(by_index.len());
-    {
-        let s = state.lock().unwrap();
-        for (idx, secret, value) in by_index {
-            let proof = s.tree.proof(idx);
-            let mut merkle_path = [Fr::zero(); 32];
-            merkle_path.copy_from_slice(&proof);
-            witnesses.push(WithdrawWitness {
-                secret,
-                value,
-                index: Fr::from(idx as u64),
-                merkle_path,
-            });
+            by_tree
+                .entry(*root_index)
+                .or_default()
+                .push((*tree_index, secret, *value));
         }
     }
 
-    let z_0 = vec![Fr::zero(), Fr::zero(), transfer_root, recipient];
-    let circuit = WithdrawCircuit::new(WithdrawParams { pow_bits: 20 })?;
-    let calldata = prove_withdraw(circuit, z_0, witnesses)?;
-    let proof_arr = decode_opaque_proof::<34>(&calldata);
+    for (root_index, mut receipts) in by_tree {
+        if receipts.len() < 2 {
+            continue; // decider requires >= 2 folded steps
+        }
+        receipts.sort_by_key(|&(idx, _, _)| idx);
 
-    let contract = IVerifier::new(config.verifier, provider);
-    let tx = contract
-        .withdraw(
-            U256::from(chain_id),
-            Address::from(exchange_addr),
-            B256::from(tweak),
-            proof_arr,
-        )
-        .send()
-        .await?;
-    let receipt = tx.get_receipt().await?;
-    println!("withdraw tx = {}", receipt.transaction_hash);
+        let (transfer_root, witnesses) = {
+            let s = state.lock().unwrap();
+            let tree = &s.finalized_trees[root_index];
+            let transfer_root = tree.root();
+            let mut witnesses = Vec::with_capacity(receipts.len());
+            for (idx, secret, value) in receipts {
+                let proof = tree.proof(idx);
+                let mut merkle_path = [Fr::zero(); TREE_DEPTH];
+                merkle_path.copy_from_slice(&proof);
+                witnesses.push(WithdrawWitness {
+                    secret,
+                    value,
+                    index: Fr::from(idx as u64),
+                    merkle_path,
+                });
+            }
+            (transfer_root, witnesses)
+        };
 
-    // rotate tweak for next batch
+        let z_0 = vec![Fr::zero(), Fr::zero(), transfer_root, recipient];
+        let circuit = WithdrawCircuit::new(WithdrawParams { pow_bits: 20 })?;
+        let calldata = prove_withdraw(circuit, z_0, witnesses)?;
+        let proof_arr = decode_opaque_proof::<34>(&calldata);
+
+        let contract = IVerifier::new(config.verifier, provider);
+        let tx = contract
+            .withdraw(
+                U256::from(chain_id),
+                Address::from(exchange_addr),
+                B256::from(tweak),
+                U256::from(root_index as u64),
+                proof_arr,
+            )
+            .send()
+            .await?;
+        let receipt = tx.get_receipt().await?;
+        println!(
+            "withdraw tx (tree {root_index}) = {}",
+            receipt.transaction_hash
+        );
+    }
+
+    // Rotate tweak for the next batch.
     let mut rng = rand::thread_rng();
     let mut new_tweak = [0u8; 32];
     use rand::RngCore;
@@ -339,6 +328,66 @@ async fn do_withdraw(
     state.lock().unwrap().rotate_tweak(new_tweak)?;
 
     Ok(())
+}
+
+async fn catch_up(
+    state: &SharedState,
+    provider: &impl Provider,
+    config: &Config,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let latest = provider.get_block_number().await?;
+    let transfers = fetch_transfers(provider, config.token, config.last_block + 1, latest).await?;
+
+    // How many trees are already finalized on-chain?
+    let on_chain_roots: Vec<Fr> = {
+        let contract = IVerifier::new(config.verifier, provider);
+        let n: u64 = contract
+            .transferRootsLength()
+            .call()
+            .await?
+            .try_into()
+            .unwrap();
+        let mut roots = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            let r: U256 = contract.transferRoots(U256::from(i)).call().await?;
+            roots.push(u256_to_fr(r));
+        }
+        roots
+    };
+
+    let mut witnesses = Vec::new();
+    let mut z_0 = vec![Fr::zero(), Fr::zero(), Fr::zero()];
+    let mut in_new = false;
+    {
+        let mut s = state.lock().unwrap();
+        for (to, value) in transfers {
+            // Finalize a tree when it fills, matching on-chain roots.
+            if s.tree.len() == TREE_CAPACITY {
+                let finalized = std::mem::replace(&mut s.tree, MerkleTree::new(TREE_DEPTH));
+                s.finalized_trees.push(finalized);
+                s.pending = None;
+                in_new = false;
+            }
+            let is_historical = s.finalized_trees.len() < on_chain_roots.len();
+            if is_historical {
+                apply_transfer(&mut s, to, value, false)?;
+            } else {
+                if !in_new {
+                    z_0 = vec![Fr::zero(), s.chain.state(), s.tree.root()];
+                    in_new = true;
+                }
+                if let Some(w) = apply_transfer(&mut s, to, value, true)? {
+                    witnesses.push(w);
+                }
+            }
+        }
+        if !witnesses.is_empty() {
+            s.pending = Some((z_0, witnesses));
+        }
+    }
+
+    do_update_root(state, provider, config).await?;
+    Ok(latest)
 }
 
 // ---- HTTP handlers ----

@@ -10,7 +10,7 @@ use ark_r1cs_std::{
 use ark_relations::gr1cs::{ConstraintSystemRef, Namespace, SynthesisError};
 use folding_schemes::{Error, frontend::FCircuit};
 
-use crate::zkp::poseidon2_var;
+use crate::{tree::TREE_DEPTH, zkp::poseidon2_var};
 
 pub fn hash_chain_step_var(
     prev: FpVar<Fr>,
@@ -42,7 +42,7 @@ pub fn merkle_root_var(
 pub struct RootTransitionWitness {
     pub to: Fr,
     pub value: Fr,
-    pub merkle_path: [Fr; 32],
+    pub merkle_path: [Fr; TREE_DEPTH],
 }
 
 impl Default for RootTransitionWitness {
@@ -50,7 +50,7 @@ impl Default for RootTransitionWitness {
         Self {
             to: Fr::zero(),
             value: Fr::zero(),
-            merkle_path: [Fr::zero(); 32],
+            merkle_path: [Fr::zero(); TREE_DEPTH],
         }
     }
 }
@@ -59,7 +59,7 @@ impl Default for RootTransitionWitness {
 pub struct RootTransitionWitnessVar {
     pub to: FpVar<Fr>,
     pub value: FpVar<Fr>,
-    pub merkle_path: [FpVar<Fr>; 32],
+    pub merkle_path: [FpVar<Fr>; TREE_DEPTH],
 }
 
 impl AllocVar<RootTransitionWitness, Fr> for RootTransitionWitnessVar {
@@ -75,7 +75,7 @@ impl AllocVar<RootTransitionWitness, Fr> for RootTransitionWitnessVar {
         Ok(Self {
             to: FpVar::<Fr>::new_variable(cs.clone(), || Ok(w.to), mode)?,
             value: FpVar::<Fr>::new_variable(cs.clone(), || Ok(w.value), mode)?,
-            merkle_path: <[FpVar<Fr>; 32] as AllocVar<[Fr; 32], Fr>>::new_variable(
+            merkle_path: <[FpVar<Fr>; TREE_DEPTH] as AllocVar<[Fr; TREE_DEPTH], Fr>>::new_variable(
                 cs.clone(),
                 || Ok(w.merkle_path),
                 mode,
@@ -245,7 +245,7 @@ mod tests {
             let proof = tree.proof(i);
             let leaf = leaves[i];
 
-            let mut merkle_path = [Fr::zero(); 32];
+            let mut merkle_path = [Fr::zero(); TREE_DEPTH];
             merkle_path.copy_from_slice(&proof);
             let witness = RootTransitionWitness {
                 to: address_to_fr(*to),

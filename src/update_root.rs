@@ -10,7 +10,7 @@ use ark_bn254::Fr;
 use ark_ff::{BigInteger, PrimeField, Zero};
 use folding_schemes::frontend::FCircuit;
 
-use crate::tree::{HashChain, MerkleTree};
+use crate::tree::{HashChain, MerkleTree, TREE_DEPTH};
 use crate::zkp::{RootTransitionCircuit, RootTransitionWitness, prove_root_transition};
 use crate::{burn::address_to_fr, zkp::poseidon2};
 
@@ -84,7 +84,7 @@ pub async fn run(
 
         let index = tree.len();
         let proof = tree.proof_for_empty(index);
-        let mut merkle_path = [Fr::zero(); 32];
+        let mut merkle_path = [Fr::zero(); TREE_DEPTH];
         merkle_path.copy_from_slice(&proof);
         witnesses.push(RootTransitionWitness {
             to: address_to_fr(to_bytes),

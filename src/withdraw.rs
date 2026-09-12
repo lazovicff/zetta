@@ -10,7 +10,7 @@ use ark_bn254::Fr;
 use ark_ff::{PrimeField, Zero};
 use folding_schemes::frontend::FCircuit;
 
-use crate::tree::MerkleTree;
+use crate::tree::{MerkleTree, TREE_DEPTH};
 use crate::zkp::{WithdrawCircuit, WithdrawParams, WithdrawWitness, prove_withdraw};
 use crate::{
     burn::{address_to_fr, recipient, trim_to_160},
@@ -140,7 +140,7 @@ pub async fn run(
     let mut witnesses = Vec::with_capacity(by_index.len());
     for (idx, secret, value) in by_index {
         let proof = tree.proof(idx);
-        let mut merkle_path = [Fr::zero(); 32];
+        let mut merkle_path = [Fr::zero(); TREE_DEPTH];
         merkle_path.copy_from_slice(&proof);
         witnesses.push(WithdrawWitness {
             secret,
