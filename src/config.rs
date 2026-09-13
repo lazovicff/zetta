@@ -1,14 +1,10 @@
 use alloy::primitives::Address;
-use ark_bn254::Fr;
-use ark_ff::PrimeField;
-use num_bigint::BigUint;
 
 pub struct Config {
     pub rpc_url: String,
     pub token: Address,
     pub verifier: Address,
     pub private_key: String,
-    pub secrets: Vec<Fr>,
     pub tweak: [u8; 32],
     pub poll_interval_secs: u64,
     pub port: u16,
@@ -26,7 +22,6 @@ impl Config {
             token: std::env::var("TOKEN")?.parse()?,
             verifier: std::env::var("VERIFIER")?.parse()?,
             private_key: std::env::var("PRIVATE_KEY")?,
-            secrets: parse_secrets(&std::env::var("SECRETS")?)?,
             tweak: parse_tweak(&std::env::var("TWEAK")?)?,
             poll_interval_secs: std::env::var("POLL_INTERVAL_SECS")?.parse()?,
             port: std::env::var("PORT")?.parse()?,
@@ -34,17 +29,6 @@ impl Config {
             last_block,
         })
     }
-}
-
-fn parse_secrets(s: &str) -> Result<Vec<Fr>, Box<dyn std::error::Error>> {
-    s.split(',')
-        .map(str::trim)
-        .filter(|x| !x.is_empty())
-        .map(|x| {
-            let n = BigUint::parse_bytes(x.as_bytes(), 10).ok_or("invalid secret decimal")?;
-            Ok(Fr::from_be_bytes_mod_order(&n.to_bytes_be()))
-        })
-        .collect()
 }
 
 fn parse_tweak(s: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {

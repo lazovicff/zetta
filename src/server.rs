@@ -8,22 +8,24 @@ use alloy::rpc::types::Filter;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use alloy::sol_types::SolEvent;
-use ark_bn254::Fr;
-use ark_ff::{PrimeField, Zero};
+use ark_bn254::{Fq, Fr};
+use ark_ec::{AffineRepr, CurveGroup, PrimeGroup};
+use ark_ff::{BigInteger, PrimeField, Zero};
+use ark_grumpkin::{Affine as G2Affine, Projective as G2};
 use axum::extract::State as AxumState;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use folding_schemes::frontend::FCircuit;
 
-use crate::burn::{address_to_fr, recipient};
+use crate::burn::{address_to_fr, recipient, trim_to_160};
 use crate::config::Config;
 use crate::state::State;
 use crate::tree::{MerkleTree, TREE_CAPACITY, TREE_DEPTH};
 use crate::zkp::poseidon2;
 use crate::zkp::{
-    RootTransitionCircuit, RootTransitionWitness, WithdrawCircuit, WithdrawParams, WithdrawWitness,
+    RootTransitionCircuit, RootTransitionWitness, WithdrawCircuit, WithdrawWitness, poseidon3,
     prove_root_transition, prove_withdraw,
 };
 
@@ -109,25 +111,25 @@ fn apply_transfer(
     let leaf = poseidon2(to_fr, value)?;
     s.tree.insert(leaf);
     s.chain.apply(to, value);
-    if s.secret_by_addr.contains_key(&to) {
+    if s.pubkey_by_addr.contains_key(&to) {
         let root_index = s.finalized_trees.len();
         s.deposits.insert(to, (value, root_index, index));
     }
     Ok(witness)
 }
 
-fn log_burn_addresses(state: &SharedState) {
+fn log_recipient(state: &SharedState) {
     let s = state.lock().unwrap();
-    for (i, addr) in s.burn_addresses.iter().enumerate() {
-        println!("burn address #{} = 0x{}", i, hex::encode(addr));
-    }
+    let r = recipient(s.chain_id, s.exchange_addr, s.tweak);
+    println!("recipient = {}", r);
 }
 
 fn spawn_http_server(state: SharedState, port: u16) {
     tokio::spawn(async move {
         let app = Router::new()
             .route("/health", get(health))
-            .route("/deposit-address", get(deposit_address))
+            .route("/recipient", get(current_recipient))
+            .route("/register", post(register))
             .route("/deposits", get(deposits))
             .route("/status", get(status))
             .with_state(state);
@@ -152,7 +154,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         exchange_addr,
     )?));
 
-    log_burn_addresses(&state);
+    log_recipient(&state);
     spawn_http_server(state.clone(), config.port);
 
     let mut last_block = catch_up(&state, &provider, &config).await?;
@@ -252,23 +254,32 @@ async fn do_withdraw(
     provider: &impl Provider,
     config: &Config,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (tweak, exchange_addr, chain_id, deposits) = {
+    let (tweak, exchange_addr, chain_id) = {
         let s = state.lock().unwrap();
-        (s.tweak, s.exchange_addr, s.chain_id, s.deposits.clone())
+        (s.tweak, s.exchange_addr, s.chain_id)
     };
-
     let recipient = recipient(chain_id, exchange_addr, tweak);
 
-    // Group deposits by rootIndex.
-    let mut by_tree: HashMap<usize, Vec<(usize, Fr, Fr)>> = HashMap::new();
+    // Group deposits by rootIndex: (tree_index, P, R, z, value).
+    let mut by_tree: HashMap<usize, Vec<(usize, G2, G2, Fq, Fr)>> = HashMap::new();
     {
         let s = state.lock().unwrap();
-        for (addr, (value, root_index, tree_index)) in &deposits {
-            let secret = s.secret_by_addr[addr];
-            by_tree
-                .entry(*root_index)
-                .or_default()
-                .push((*tree_index, secret, *value));
+        for (addr, (value, root_index, tree_index)) in &s.deposits {
+            if *root_index >= s.finalized_trees.len() {
+                continue; // tree not finalized yet
+            }
+            let (Some(pubkey), Some((sig_r, sig_z))) =
+                (s.pubkey_by_addr.get(addr), s.sig_by_addr.get(addr))
+            else {
+                continue;
+            };
+            by_tree.entry(*root_index).or_default().push((
+                *tree_index,
+                *pubkey,
+                *sig_r,
+                *sig_z,
+                *value,
+            ));
         }
     }
 
@@ -276,19 +287,21 @@ async fn do_withdraw(
         if receipts.len() < 2 {
             continue; // decider requires >= 2 folded steps
         }
-        receipts.sort_by_key(|&(idx, _, _)| idx);
+        receipts.sort_by_key(|r| r.0);
 
         let (transfer_root, witnesses) = {
             let s = state.lock().unwrap();
             let tree = &s.finalized_trees[root_index];
             let transfer_root = tree.root();
             let mut witnesses = Vec::with_capacity(receipts.len());
-            for (idx, secret, value) in receipts {
+            for (idx, pubkey, sig_r, sig_z, value) in receipts {
                 let proof = tree.proof(idx);
                 let mut merkle_path = [Fr::zero(); TREE_DEPTH];
                 merkle_path.copy_from_slice(&proof);
                 witnesses.push(WithdrawWitness {
-                    secret,
+                    pubkey,
+                    sig_r,
+                    sig_z,
                     value,
                     index: Fr::from(idx as u64),
                     merkle_path,
@@ -298,7 +311,7 @@ async fn do_withdraw(
         };
 
         let z_0 = vec![Fr::zero(), Fr::zero(), transfer_root, recipient];
-        let circuit = WithdrawCircuit::new(WithdrawParams { pow_bits: 20 })?;
+        let circuit = WithdrawCircuit::new(())?;
         let calldata = prove_withdraw(circuit, z_0, witnesses)?;
         let proof_arr = decode_opaque_proof::<34>(&calldata);
 
@@ -318,14 +331,13 @@ async fn do_withdraw(
             "withdraw tx (tree {root_index}) = {}",
             receipt.transaction_hash
         );
-    }
 
-    // Rotate tweak for the next batch.
-    let mut rng = rand::thread_rng();
-    let mut new_tweak = [0u8; 32];
-    use rand::RngCore;
-    rng.fill_bytes(&mut new_tweak);
-    state.lock().unwrap().rotate_tweak(new_tweak)?;
+        state
+            .lock()
+            .unwrap()
+            .deposits
+            .retain(|_, (_, ri, _)| *ri != root_index);
+    }
 
     Ok(())
 }
@@ -396,14 +408,90 @@ async fn health() -> &'static str {
     "ok"
 }
 
-async fn deposit_address(AxumState(state): AxumState<SharedState>) -> impl IntoResponse {
-    let mut s = state.lock().unwrap();
-    if s.next_index >= s.burn_addresses.len() {
-        return (StatusCode::NOT_FOUND, "no deposit addresses available").into_response();
+async fn current_recipient(AxumState(state): AxumState<SharedState>) -> impl IntoResponse {
+    let s = state.lock().unwrap();
+    let r = recipient(s.chain_id, s.exchange_addr, s.tweak);
+    Json(serde_json::json!({ "recipient": r.to_string() })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct RegisterReq {
+    address: String,          // 0x + 40 hex
+    pubkey: (String, String), // P = (x, y), decimal, grumpkin base field (= bn254 Fr)
+    sig_r: (String, String),  // R = (x, y), decimal
+    sig_z: String,            // z = k + e·x, decimal, grumpkin scalar field (= bn254 Fq)
+}
+
+fn parse_hex20(s: &str) -> Result<[u8; 20], String> {
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    let b = hex::decode(s).map_err(|e| e.to_string())?;
+    b.try_into().map_err(|_| "expected 20 bytes".to_string())
+}
+
+fn parse_decimal_fr(s: &str) -> Result<Fr, String> {
+    let n = num_bigint::BigUint::parse_bytes(s.as_bytes(), 10).ok_or("invalid decimal")?;
+    Ok(Fr::from_be_bytes_mod_order(&n.to_bytes_be()))
+}
+
+fn parse_decimal_fq(s: &str) -> Result<Fq, String> {
+    let n = num_bigint::BigUint::parse_bytes(s.as_bytes(), 10).ok_or("invalid decimal")?;
+    Ok(Fq::from_be_bytes_mod_order(&n.to_bytes_be()))
+}
+
+async fn register(
+    AxumState(state): AxumState<SharedState>,
+    Json(req): Json<RegisterReq>,
+) -> impl IntoResponse {
+    match register_inner(&state, req) {
+        Ok(()) => (StatusCode::OK, "registered").into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
-    let addr = s.burn_addresses[s.next_index];
-    s.next_index += 1;
-    Json(serde_json::json!({ "address": format!("0x{}", hex::encode(addr)) })).into_response()
+}
+
+fn register_inner(state: &SharedState, req: RegisterReq) -> Result<(), String> {
+    let addr = parse_hex20(&req.address)?;
+    let pk = G2Affine::new_unchecked(
+        parse_decimal_fr(&req.pubkey.0)?,
+        parse_decimal_fr(&req.pubkey.1)?,
+    );
+    let r = G2Affine::new_unchecked(
+        parse_decimal_fr(&req.sig_r.0)?,
+        parse_decimal_fr(&req.sig_r.1)?,
+    );
+    if !pk.is_on_curve() || !r.is_on_curve() {
+        return Err("point not on curve".into());
+    }
+    use ark_ec::short_weierstrass::SWCurveConfig; // for GrumpkinConfig::GENERATOR
+    if pk.is_zero() || pk.x == ark_grumpkin::GrumpkinConfig::GENERATOR.x {
+        return Err("degenerate pubkey".into());
+    }
+
+    let z = parse_decimal_fq(&req.sig_z)?;
+
+    let recipient = {
+        let s = state.lock().unwrap();
+        recipient(s.chain_id, s.exchange_addr, s.tweak)
+    };
+
+    // Address must be derivable from the pubkey under the current recipient.
+    let derived = trim_to_160(poseidon2(recipient, pk.x).map_err(|e| e.to_string())?);
+    if derived != addr {
+        return Err("address does not match pubkey for current recipient".into());
+    }
+
+    // Schnorr: z·G == R + e·P with e = poseidon3(R.x, P.x, recipient).
+    let e_fr = poseidon3(r.x, pk.x, recipient).map_err(|e| e.to_string())?;
+    let e = Fq::from_be_bytes_mod_order(&e_fr.into_bigint().to_bytes_be());
+    let lhs = (G2::generator() * z).into_affine();
+    let rhs = (G2::from(r) + G2::from(pk) * e).into_affine();
+    if lhs != rhs {
+        return Err("bad signature".into());
+    }
+
+    let mut s = state.lock().unwrap();
+    s.pubkey_by_addr.insert(addr, G2::from(pk));
+    s.sig_by_addr.insert(addr, (G2::from(r), z));
+    Ok(())
 }
 
 async fn status(AxumState(state): AxumState<SharedState>) -> impl IntoResponse {
@@ -412,7 +500,7 @@ async fn status(AxumState(state): AxumState<SharedState>) -> impl IntoResponse {
         "index": s.chain.index(),
         "root": s.tree.root().to_string(),
         "deposits": s.deposits.len(),
-        "available": s.burn_addresses.len().saturating_sub(s.next_index),
+        "registered": s.pubkey_by_addr.len(),
     }))
     .into_response()
 }

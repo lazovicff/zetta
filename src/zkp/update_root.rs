@@ -177,7 +177,7 @@ mod tests {
         use crate::tree::MerkleTree;
         use ark_relations::gr1cs::ConstraintSystem;
 
-        let mut tree = MerkleTree::new(32);
+        let mut tree = MerkleTree::new(TREE_DEPTH);
         let leaves: Vec<Fr> = (0..5).map(|i| Fr::from(i as u64 + 1)).collect();
         for &l in &leaves {
             tree.insert(l);
@@ -225,7 +225,7 @@ mod tests {
             ([0x03u8; 20], 300u64),
         ];
 
-        let mut tree = MerkleTree::new(32);
+        let mut tree = MerkleTree::new(TREE_DEPTH);
         let mut leaves = Vec::new();
         for (to, val) in transfers {
             let leaf = poseidon2(address_to_fr(to), Fr::from(val)).unwrap();
@@ -233,7 +233,7 @@ mod tests {
             tree.insert(leaf);
         }
 
-        let initial_root = MerkleTree::new(32).root();
+        let initial_root = MerkleTree::new(TREE_DEPTH).root();
         let mut index = Fr::zero();
         let mut hash_chain = Fr::zero();
         let mut transfer_root = initial_root;

@@ -6,5 +6,4 @@ pub mod server;
 pub mod state;
 pub mod tree;
 pub mod update_root;
-pub mod withdraw;
 pub mod zkp;

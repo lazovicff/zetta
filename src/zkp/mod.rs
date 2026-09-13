@@ -131,7 +131,7 @@ cached_params!(
     WithdrawCircuit,
     WithdrawN,
     WithdrawD,
-    WithdrawParams { pow_bits: 20 }
+    ()
 );
 
 macro_rules! prove_for {
@@ -240,7 +240,10 @@ mod tests {
     use ark_bn254::Fr;
     use ark_ff::Zero;
 
-    use crate::tree::TREE_DEPTH;
+    use crate::{
+        burn::recipient,
+        tree::{MerkleTree, TREE_DEPTH},
+    };
 
     use super::*;
 
@@ -267,7 +270,7 @@ mod tests {
             tree.insert(leaf);
         }
 
-        let initial_root = MerkleTree::new(32).root();
+        let initial_root = MerkleTree::new(TREE_DEPTH).root();
         let z_0 = vec![Fr::zero(), Fr::zero(), initial_root];
 
         let circuit = RootTransitionCircuit::new(()).unwrap();
@@ -283,39 +286,110 @@ mod tests {
         Ok(())
     }
 
+    /// Schnorr keypair + signature for one receipt, plus its Merkle leaf.
+    #[cfg(test)]
+    fn signed_leaf(
+        rng: &mut impl ark_std::rand::RngCore,
+        recipient: Fr,
+        value: u64,
+    ) -> Result<(G2, G2, ark_bn254::Fq, Fr), Box<dyn std::error::Error>> {
+        use crate::burn::{address_to_fr, trim_to_160};
+        use ark_bn254::Fq;
+        use ark_ec::{CurveGroup, PrimeGroup};
+        use ark_ff::{BigInteger, PrimeField, UniformRand};
+
+        // P = x·G
+        let x = Fq::rand(rng);
+        let pubkey = (G2::generator() * x).into_affine();
+
+        // Schnorr: R = k·G, z = k + e·x with e = poseidon3(R.x, P.x, recipient)
+        let k = Fq::rand(rng);
+        let sig_r = (G2::generator() * k).into_affine();
+        let e_fr = poseidon3(sig_r.x, pubkey.x, recipient)?;
+        let e = Fq::from_be_bytes_mod_order(&e_fr.into_bigint().to_bytes_be());
+        let sig_z = k + e * x;
+
+        let burn_addr = address_to_fr(trim_to_160(poseidon2(recipient, pubkey.x)?));
+        let leaf = poseidon2(burn_addr, Fr::from(value))?;
+        Ok((G2::from(pubkey), G2::from(sig_r), sig_z, leaf))
+    }
+
+    /// Merkle-proof witness — must be taken from the FINAL tree (after all inserts).
+    #[cfg(test)]
+    fn receipt_witness(
+        tree: &MerkleTree,
+        index: usize,
+        pubkey: G2,
+        sig_r: G2,
+        sig_z: ark_bn254::Fq,
+        value: u64,
+    ) -> Result<WithdrawWitness, Box<dyn std::error::Error>> {
+        let proof = tree.proof(index);
+        let mut merkle_path = [Fr::zero(); TREE_DEPTH];
+        merkle_path.copy_from_slice(&proof);
+        Ok(WithdrawWitness {
+            pubkey,
+            sig_r,
+            sig_z,
+            value: Fr::from(value),
+            index: Fr::from(index as u64),
+            merkle_path,
+        })
+    }
+
+    #[test]
+    fn withdraw_circuit_is_satisfied() -> Result<(), Box<dyn std::error::Error>> {
+        use ark_r1cs_std::{GR1CSVar, alloc::AllocVar, fields::fp::FpVar};
+        use ark_relations::gr1cs::ConstraintSystem;
+
+        let recipient = recipient(31337, [0x11u8; 20], [0x22u8; 32]);
+        let mut rng = ark_std::test_rng();
+
+        let (_, _, _, filler) = signed_leaf(&mut rng, recipient, 1)?;
+        let (pk, r, z, leaf) = signed_leaf(&mut rng, recipient, 100)?;
+
+        let mut tree = MerkleTree::new(TREE_DEPTH);
+        tree.insert(filler);
+        tree.insert(leaf);
+        let transfer_root = tree.root();
+
+        let witness = receipt_witness(&tree, 1, pk, r, z, 100)?;
+        let z_i = vec![Fr::zero(), Fr::zero(), transfer_root, recipient];
+
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        let z_i_var = Vec::<FpVar<Fr>>::new_witness(cs.clone(), || Ok(z_i.clone()))?;
+        let w_var = WithdrawWitnessVar::new_witness(cs.clone(), || Ok(witness))?;
+        let circuit = WithdrawCircuit::new(())?;
+        let out = circuit.generate_step_constraints(cs.clone(), 0, z_i_var, w_var)?;
+
+        assert!(cs.is_satisfied()?);
+        assert_eq!(out[0].value()?, Fr::from(2u64)); // indexWithOffset' = index + 1
+        assert_eq!(out[1].value()?, Fr::from(100u64)); // totalValue' = 0 + 100
+        Ok(())
+    }
+
     #[test]
     fn withdraw_full_pipeline() -> Result<(), Box<dyn std::error::Error>> {
-        use crate::burn::{find_burn_address, recipient};
-        use crate::tree::MerkleTree;
         use solidity_verifiers::evm::{Evm, compile_solidity};
 
         let recipient = recipient(31337, [0x11u8; 20], [0x22u8; 32]);
-        let pow_bits = 8u32;
-        let (_burn_addr, secret) = find_burn_address(recipient, pow_bits);
+        let mut rng = ark_std::test_rng();
 
-        let value = Fr::from(100u64);
-        let burn = poseidon2(recipient, secret).unwrap();
-        let burn_addr = crate::burn::address_to_fr(crate::burn::trim_to_160(burn));
-        let leaf = poseidon2(burn_addr, value).unwrap();
+        // Two receipts: the decider requires >= 2 folded steps.
+        let (pk0, r0, z0, leaf0) = signed_leaf(&mut rng, recipient, 100)?;
+        let (pk1, r1, z1, leaf1) = signed_leaf(&mut rng, recipient, 200)?;
 
         let mut tree = MerkleTree::new(TREE_DEPTH);
-        tree.insert(leaf);
+        tree.insert(leaf0);
+        tree.insert(leaf1);
         let transfer_root = tree.root();
-        let proof = tree.proof(0);
 
-        let mut merkle_path = [Fr::zero(); TREE_DEPTH];
-        merkle_path.copy_from_slice(&proof);
-        let witness = WithdrawWitness {
-            secret,
-            value,
-            index: Fr::zero(),
-            merkle_path,
-        };
+        let witness0 = receipt_witness(&tree, 0, pk0, r0, z0, 100)?;
+        let witness1 = receipt_witness(&tree, 1, pk1, r1, z1, 200)?;
 
         let z_0 = vec![Fr::zero(), Fr::zero(), transfer_root, recipient];
-
-        let circuit = WithdrawCircuit::new(WithdrawParams { pow_bits }).unwrap();
-        let calldata = prove_withdraw(circuit, z_0, vec![witness])?;
+        let circuit = WithdrawCircuit::new(())?;
+        let calldata = prove_withdraw(circuit, z_0, vec![witness0, witness1])?;
         let solidity_code = gen_withdraw_verifier()?;
 
         let bytecode = compile_solidity(&solidity_code, "NovaDecider");
