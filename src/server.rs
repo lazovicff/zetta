@@ -23,11 +23,11 @@ use crate::burn::{address_to_fr, recipient, trim_to_160};
 use crate::config::Config;
 use crate::state::State;
 use crate::tree::{MerkleTree, TREE_CAPACITY, TREE_DEPTH};
-use crate::zkp::poseidon2;
 use crate::zkp::{
-    RootTransitionCircuit, RootTransitionWitness, WithdrawCircuit, WithdrawWitness, poseidon3,
+    RootTransitionCircuit, RootTransitionWitness, WithdrawCircuit, WithdrawWitness,
     prove_root_transition, prove_withdraw,
 };
+use crate::zkp::{poseidon2, poseidon4};
 
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 value);
@@ -113,7 +113,10 @@ fn apply_transfer(
     s.chain.apply(to, value);
     if s.pubkey_by_addr.contains_key(&to) {
         let root_index = s.finalized_trees.len();
-        s.deposits.insert(to, (value, root_index, index));
+        s.deposits
+            .entry(to)
+            .or_default()
+            .push((value, root_index, index));
     }
     Ok(witness)
 }
@@ -206,11 +209,13 @@ async fn deposits(AxumState(state): AxumState<SharedState>) -> impl IntoResponse
     let list: Vec<_> = s
         .deposits
         .iter()
-        .map(|(addr, (value, _root_index, idx))| {
-            serde_json::json!({
-                "address": format!("0x{}", hex::encode(addr)),
-                "value": value.to_string(),
-                "tree_index": idx,
+        .flat_map(|(addr, ds)| {
+            ds.iter().map(move |(value, _root_index, idx)| {
+                serde_json::json!({
+                    "address": format!("0x{}", hex::encode(addr)),
+                    "value": value.to_string(),
+                    "tree_index": idx,
+                })
             })
         })
         .collect();
@@ -260,26 +265,34 @@ async fn do_withdraw(
     };
     let recipient = recipient(chain_id, exchange_addr, tweak);
 
-    // Group deposits by rootIndex: (tree_index, P, R, z, value).
-    let mut by_tree: HashMap<usize, Vec<(usize, G2, G2, Fq, Fr)>> = HashMap::new();
+    // Group deposits by rootIndex: (tree_index, P, R, z, value, expiry).
+    let mut by_tree: HashMap<usize, Vec<(usize, G2, G2, Fq, Fr, Fr)>> = HashMap::new();
     {
         let s = state.lock().unwrap();
-        for (addr, (value, root_index, tree_index)) in &s.deposits {
-            if *root_index >= s.finalized_trees.len() {
-                continue; // tree not finalized yet
+        for (addr, ds) in &s.deposits {
+            for (value, root_index, tree_index) in ds {
+                if *root_index >= s.finalized_trees.len() {
+                    continue; // tree not finalized yet
+                }
+                let (Some(pubkey), Some((sig_r, sig_z, expiry))) =
+                    (s.pubkey_by_addr.get(addr), s.sig_by_addr.get(addr))
+                else {
+                    continue;
+                };
+                let global_index = *root_index as u64 * TREE_CAPACITY as u64 + *tree_index as u64;
+                if Fr::from(global_index) > *expiry {
+                    println!("skipping receipt: index {global_index} past sig expiry");
+                    continue; // including it would make the whole batch unsatisfiable
+                }
+                by_tree.entry(*root_index).or_default().push((
+                    *tree_index,
+                    *pubkey,
+                    *sig_r,
+                    *sig_z,
+                    *value,
+                    *expiry,
+                ));
             }
-            let (Some(pubkey), Some((sig_r, sig_z))) =
-                (s.pubkey_by_addr.get(addr), s.sig_by_addr.get(addr))
-            else {
-                continue;
-            };
-            by_tree.entry(*root_index).or_default().push((
-                *tree_index,
-                *pubkey,
-                *sig_r,
-                *sig_z,
-                *value,
-            ));
         }
     }
 
@@ -294,7 +307,7 @@ async fn do_withdraw(
             let tree = &s.finalized_trees[root_index];
             let transfer_root = tree.root();
             let mut witnesses = Vec::with_capacity(receipts.len());
-            for (idx, pubkey, sig_r, sig_z, value) in receipts {
+            for (idx, pubkey, sig_r, sig_z, value, expiry) in receipts {
                 let proof = tree.proof(idx);
                 let mut merkle_path = [Fr::zero(); TREE_DEPTH];
                 merkle_path.copy_from_slice(&proof);
@@ -303,14 +316,20 @@ async fn do_withdraw(
                     sig_r,
                     sig_z,
                     value,
-                    index: Fr::from(idx as u64),
+                    index: Fr::from(root_index as u64 * TREE_CAPACITY as u64 + idx as u64),
+                    expiry,
                     merkle_path,
                 });
             }
             (transfer_root, witnesses)
         };
 
-        let z_0 = vec![Fr::zero(), Fr::zero(), transfer_root, recipient];
+        let z_0 = vec![
+            Fr::from(root_index as u64 * TREE_CAPACITY as u64),
+            Fr::zero(),
+            transfer_root,
+            recipient,
+        ];
         let circuit = WithdrawCircuit::new(())?;
         let calldata = prove_withdraw(circuit, z_0, witnesses)?;
         let proof_arr = decode_opaque_proof::<34>(&calldata);
@@ -332,11 +351,13 @@ async fn do_withdraw(
             receipt.transaction_hash
         );
 
-        state
-            .lock()
-            .unwrap()
-            .deposits
-            .retain(|_, (_, ri, _)| *ri != root_index);
+        {
+            let mut s = state.lock().unwrap();
+            for ds in s.deposits.values_mut() {
+                ds.retain(|(_, ri, _)| *ri != root_index);
+            }
+            s.deposits.retain(|_, ds| !ds.is_empty());
+        }
     }
 
     Ok(())
@@ -417,9 +438,10 @@ async fn current_recipient(AxumState(state): AxumState<SharedState>) -> impl Int
 #[derive(serde::Deserialize)]
 struct RegisterReq {
     address: String,          // 0x + 40 hex
-    pubkey: (String, String), // P = (x, y), decimal, grumpkin base field (= bn254 Fr)
+    pubkey: (String, String), // P = (x, y), decimal, grumpkin base field
     sig_r: (String, String),  // R = (x, y), decimal
-    sig_z: String,            // z = k + e·x, decimal, grumpkin scalar field (= bn254 Fq)
+    sig_z: String,            // z = k + e·x, decimal, grumpkin scalar field
+    expiry: String,           // max global burn index this signature authorizes, decimal
 }
 
 fn parse_hex20(s: &str) -> Result<[u8; 20], String> {
@@ -468,10 +490,18 @@ fn register_inner(state: &SharedState, req: RegisterReq) -> Result<(), String> {
 
     let z = parse_decimal_fq(&req.sig_z)?;
 
-    let recipient = {
+    let expiry = parse_decimal_fr(&req.expiry)?;
+
+    let (recipient, burn_index) = {
         let s = state.lock().unwrap();
-        recipient(s.chain_id, s.exchange_addr, s.tweak)
+        (
+            recipient(s.chain_id, s.exchange_addr, s.tweak),
+            s.chain.index(),
+        )
     };
+    if expiry < Fr::from(burn_index) {
+        return Err("expiry is behind the current burn index".into());
+    }
 
     // Address must be derivable from the pubkey under the current recipient.
     let derived = trim_to_160(poseidon2(recipient, pk.x).map_err(|e| e.to_string())?);
@@ -480,7 +510,7 @@ fn register_inner(state: &SharedState, req: RegisterReq) -> Result<(), String> {
     }
 
     // Schnorr: z·G == R + e·P with e = poseidon3(R.x, P.x, recipient).
-    let e_fr = poseidon3(r.x, pk.x, recipient).map_err(|e| e.to_string())?;
+    let e_fr = poseidon4(r.x, pk.x, recipient, expiry).map_err(|e| e.to_string())?;
     let e = Fq::from_be_bytes_mod_order(&e_fr.into_bigint().to_bytes_be());
     let lhs = (G2::generator() * z).into_affine();
     let rhs = (G2::from(r) + G2::from(pk) * e).into_affine();
@@ -490,7 +520,7 @@ fn register_inner(state: &SharedState, req: RegisterReq) -> Result<(), String> {
 
     let mut s = state.lock().unwrap();
     s.pubkey_by_addr.insert(addr, G2::from(pk));
-    s.sig_by_addr.insert(addr, (G2::from(r), z));
+    s.sig_by_addr.insert(addr, (G2::from(r), z, expiry));
     Ok(())
 }
 

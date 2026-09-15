@@ -14,6 +14,11 @@ pub fn poseidon3(a: Fr, b: Fr, c: Fr) -> Result<Fr, light_poseidon::PoseidonErro
     let mut p = Poseidon::<Fr>::new_circom(3)?;
     p.hash(&[a, b, c])
 }
+/// Circomlib-compatible 4-ary Poseidon over bn254.
+pub fn poseidon4(a: Fr, b: Fr, c: Fr, d: Fr) -> Result<Fr, light_poseidon::PoseidonError> {
+    let mut p = Poseidon::<Fr>::new_circom(4)?;
+    p.hash(&[a, b, c, d])
+}
 
 pub fn poseidon_var(inputs: &[FpVar<Fr>]) -> Result<FpVar<Fr>, SynthesisError> {
     assert!(inputs.len() < 256);
@@ -57,6 +62,15 @@ pub fn poseidon3_var(
     c: FpVar<Fr>,
 ) -> Result<FpVar<Fr>, SynthesisError> {
     poseidon_var(&[a, b, c])
+}
+
+pub fn poseidon4_var(
+    a: FpVar<Fr>,
+    b: FpVar<Fr>,
+    c: FpVar<Fr>,
+    d: FpVar<Fr>,
+) -> Result<FpVar<Fr>, SynthesisError> {
+    poseidon_var(&[a, b, c, d])
 }
 
 fn apply_ark(state: &mut [FpVar<Fr>], ark: &[Fr], round: usize, width: usize) {

@@ -16,9 +16,10 @@ pub struct State {
     pub tweak: [u8; 32],
     /// Registered burn-address pubkeys (P = x·G).
     pub pubkey_by_addr: HashMap<[u8; 20], G2>,
-    /// Schnorr authorization for the current recipient: (R, z) per burn address.
-    pub sig_by_addr: HashMap<[u8; 20], (G2, Fq)>,
-    pub deposits: HashMap<[u8; 20], (Fr, usize, usize)>,
+    /// Schnorr authorization per burn address: (R, z, expiry).
+    pub sig_by_addr: HashMap<[u8; 20], (G2, Fq, Fr)>,
+    /// All deposits per burn address: (value, root_index, tree_index) per deposit.
+    pub deposits: HashMap<[u8; 20], Vec<(Fr, usize, usize)>>,
     pub pending: Option<(Vec<Fr>, Vec<RootTransitionWitness>)>,
 }
 

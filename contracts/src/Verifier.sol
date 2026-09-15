@@ -76,6 +76,7 @@ contract Verifier {
         uint256 proofRecipient = proof[4]; // z0[3] = recipient
         uint256 sum = proof[6];           // zi[1] = sum
 
+        require(proof[1] == rootIndex * TREE_CAPACITY, "index offset mismatch");
         require(root == transferRoots[rootIndex], "unknown root");
         require(proofRecipient == recipient, "recipient mismatch");
 

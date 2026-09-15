@@ -28,3 +28,22 @@ pub fn address_to_fr(address: [u8; 20]) -> Fr {
     b[12..].copy_from_slice(&address);
     Fr::from_be_bytes_mod_order(&b)
 }
+
+#[cfg(test)]
+mod tests {
+    use ark_ec::{CurveGroup, PrimeGroup};
+
+    #[test]
+    fn print_mobile_vector() {
+        let x = ark_bn254::Fq::from(123456789u64);
+        let p = (ark_grumpkin::Projective::generator() * x).into_affine();
+        let recipient = crate::burn::recipient(31337, [0x11u8; 20], [0x22u8; 32]);
+        let burn = crate::zkp::poseidon2(recipient, p.x).unwrap();
+        println!("PX = {}", p.x);
+        println!("RECIPIENT = {}", recipient);
+        println!(
+            "BURN_ADDR = 0x{}",
+            hex::encode(crate::burn::trim_to_160(burn))
+        );
+    }
+}

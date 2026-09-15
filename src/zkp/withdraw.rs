@@ -1,6 +1,7 @@
 use std::borrow::Borrow;
 
-use crate::tree::TREE_DEPTH;
+use crate::zkp::{merkle_root_var, poseidon2_var};
+use crate::{tree::TREE_DEPTH, zkp::poseidon4_var};
 use ark_bn254::{Fq, Fr};
 use ark_ec::PrimeGroup;
 use ark_ff::{BigInteger, PrimeField, Zero};
@@ -17,8 +18,6 @@ use ark_r1cs_std::{
 use ark_relations::gr1cs::{ConstraintSystemRef, Namespace, SynthesisError};
 use folding_schemes::{Error, frontend::FCircuit};
 
-use crate::zkp::{merkle_root_var, poseidon2_var, poseidon3_var};
-
 #[derive(Clone, Debug)]
 pub struct WithdrawWitness {
     pub pubkey: G2, // P = x·G
@@ -26,6 +25,7 @@ pub struct WithdrawWitness {
     pub sig_z: Fq,  // z = k + e·x  (grumpkin scalar == bn254 Fq, NOT Fr)
     pub value: Fr,
     pub index: Fr,
+    pub expiry: Fr,
     pub merkle_path: [Fr; TREE_DEPTH],
 }
 
@@ -37,6 +37,7 @@ impl Default for WithdrawWitness {
             sig_z: Fq::zero(),
             value: Fr::zero(),
             index: Fr::zero(),
+            expiry: Fr::zero(),
             merkle_path: [Fr::zero(); TREE_DEPTH],
         }
     }
@@ -49,6 +50,7 @@ pub struct WithdrawWitnessVar {
     pub sig_z_bits: Vec<Boolean<Fr>>, // z decomposed off-circuit (free)
     pub value: FpVar<Fr>,
     pub index: FpVar<Fr>,
+    pub expiry: FpVar<Fr>,
     pub merkle_path: [FpVar<Fr>; TREE_DEPTH],
 }
 
@@ -79,6 +81,7 @@ impl AllocVar<WithdrawWitness, Fr> for WithdrawWitnessVar {
             sig_z_bits,
             value: FpVar::<Fr>::new_variable(cs.clone(), || Ok(w.value), mode)?,
             index: FpVar::<Fr>::new_variable(cs.clone(), || Ok(w.index), mode)?,
+            expiry: FpVar::<Fr>::new_variable(cs.clone(), || Ok(w.expiry), mode)?,
             merkle_path: <[FpVar<Fr>; TREE_DEPTH] as AllocVar<[Fr; TREE_DEPTH], Fr>>::new_variable(
                 cs.clone(),
                 || Ok(w.merkle_path),
@@ -88,23 +91,29 @@ impl AllocVar<WithdrawWitness, Fr> for WithdrawWitnessVar {
     }
 }
 
-/// e = poseidon3(R.x, pk.x, recipient) over Fr.
-/// (client reduces this to grumpkin scalar field to compute z; circuit uses the
-/// unreduced bits — equivalent because points have order q)
-fn challenge(pk: &GVar, r: &GVar, recipient: FpVar<Fr>) -> Result<FpVar<Fr>, SynthesisError> {
+/// e = poseidon4(R.x, pk.x, recipient, expiry) over Fr.
+/// The expiry is bound into the signature, so the user can't pick it at
+/// proving time.
+fn challenge(
+    pk: &GVar,
+    r: &GVar,
+    recipient: FpVar<Fr>,
+    expiry: FpVar<Fr>,
+) -> Result<FpVar<Fr>, SynthesisError> {
     let r_aff = r.to_affine()?;
     let pk_aff = pk.to_affine()?;
-    poseidon3_var(r_aff.x, pk_aff.x, recipient)
+    poseidon4_var(r_aff.x, pk_aff.x, recipient, expiry)
 }
 
-/// require z·G + e·(−P) == R
+/// require z·G − e·P == R
 fn schnorr_verify(
     pk: &GVar,
     r: &GVar,
     z_bits: &[Boolean<Fr>],
     recipient: FpVar<Fr>,
+    expiry: FpVar<Fr>,
 ) -> Result<(), SynthesisError> {
-    let e = challenge(pk, r, recipient)?;
+    let e = challenge(pk, r, recipient, expiry)?;
     let e_bits = e.to_bits_le()?;
 
     let g = GVar::constant(G2::generator());
@@ -147,8 +156,9 @@ impl FCircuit<Fr> for WithdrawCircuit {
         let pubkey = &external_inputs.pubkey;
         let sig_r = &external_inputs.sig_r;
         let sig_z_bits = &external_inputs.sig_z_bits;
+        let expiry = external_inputs.expiry;
         let value = external_inputs.value;
-        let index = external_inputs.index;
+        let index = external_inputs.index; // GLOBAL burn index
         let merkle_path = &external_inputs.merkle_path;
 
         // address = low160(poseidon2(recipient, x(P)))
@@ -158,18 +168,24 @@ impl FCircuit<Fr> for WithdrawCircuit {
         let address = Boolean::le_bits_to_fp(&burn_bits[0..160])?;
 
         // Schnorr verify (proves the user authorized this address)
-        schnorr_verify(pubkey, sig_r, sig_z_bits, recipient.clone())?;
+        schnorr_verify(pubkey, sig_r, sig_z_bits, recipient.clone(), expiry.clone())?;
+
+        // signature only authorizes deposits at global index <= expiry
+        let until = expiry - index.clone();
+        let _ = until.to_bits_le_with_top_bits_zero(40)?;
 
         // leaf = poseidon2(address, value)
         let leaf = poseidon2_var(address, value.clone())?;
 
-        // transferRoot == merkle_root(index, leaf, merkle_path)
-        let root = merkle_root_var(index.clone(), leaf, merkle_path)?;
+        // transferRoot == merkle_root(localIndex, leaf, merkle_path)
+        let (index_bits, _) = index.to_bits_le_with_top_bits_zero(40)?;
+        let local_index = Boolean::le_bits_to_fp(&index_bits[..TREE_DEPTH])?;
+        let root = merkle_root_var(local_index, leaf, merkle_path)?;
         root.enforce_equal(&transfer_root)?;
 
-        // index + 1 > indexWithOffset
+        // index + 1 > indexWithOffset (both are GLOBAL indexes)
         let diff = index.clone() - index_with_offset.clone();
-        let _ = diff.to_bits_le_with_top_bits_zero(32)?;
+        let _ = diff.to_bits_le_with_top_bits_zero(40)?;
 
         // value < 2^248
         let _ = value.to_bits_le_with_top_bits_zero(248)?;
