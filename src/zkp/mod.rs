@@ -346,11 +346,16 @@ mod tests {
         use ark_r1cs_std::{GR1CSVar, alloc::AllocVar, fields::fp::FpVar};
         use ark_relations::gr1cs::ConstraintSystem;
 
+        use tracing_subscriber::layer::SubscriberExt;
+        let layer = ark_relations::gr1cs::ConstraintLayer::default();
+        let subscriber = tracing_subscriber::Registry::default().with(layer);
+        let _guard = tracing::subscriber::set_default(subscriber);
+
         let recipient = recipient(31337, [0x11u8; 20], [0x22u8; 32]);
         let mut rng = ark_std::test_rng();
 
         let (_, _, _, _, filler) = signed_leaf(&mut rng, recipient, 1, 0)?;
-        let (pk, r, z, expiry, leaf) = signed_leaf(&mut rng, recipient, 100, 0)?;
+        let (pk, r, z, expiry, leaf) = signed_leaf(&mut rng, recipient, 100, 100)?;
 
         let mut tree = MerkleTree::new(TREE_DEPTH);
         tree.insert(filler);
@@ -372,10 +377,12 @@ mod tests {
 
         // expired signature must be rejected by the circuit
         let cs2 = ConstraintSystem::<Fr>::new_ref();
+        let (_, _, _, _, filler2) = signed_leaf(&mut rng, recipient, 1, 0)?;
         let (pk, r, z, _, leaf) = signed_leaf(&mut rng, recipient, 0, 50)?; // expiry = 0
         let mut tree2 = MerkleTree::new(TREE_DEPTH);
-        tree2.insert(leaf);
-        let w = receipt_witness(&tree2, 0, pk, r, z, 0, 50)?; // index 0, but cursor...
+        tree2.insert(filler2); // global index 0
+        tree2.insert(leaf); //    global index 1 > expiry 0 ⇒ unauthorized
+        let w = receipt_witness(&tree2, 1, pk, r, z, 0, 50)?;
         let z_i_var2 = Vec::<FpVar<Fr>>::new_witness(cs2.clone(), || {
             Ok(vec![Fr::zero(), Fr::zero(), tree2.root(), recipient])
         })?;

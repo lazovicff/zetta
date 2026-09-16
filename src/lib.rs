@@ -1,5 +1,6 @@
 pub mod burn;
 pub mod config;
+pub mod db;
 pub mod indexer;
 pub mod server;
 pub mod state;

@@ -2,6 +2,7 @@ use alloy::primitives::Address;
 
 pub struct Config {
     pub rpc_url: String,
+    pub db_path: String,
     pub token: Address,
     pub verifier: Address,
     pub private_key: String,
@@ -19,6 +20,7 @@ impl Config {
         let last_block = load_deployment_block(chain_id)?;
         Ok(Self {
             rpc_url: std::env::var("RPC_URL")?,
+            db_path: std::env::var("DB_PATH").unwrap_or_else(|_| "zetta.db".to_string()),
             token: std::env::var("TOKEN")?.parse()?,
             verifier: std::env::var("VERIFIER")?.parse()?,
             private_key: std::env::var("PRIVATE_KEY")?,

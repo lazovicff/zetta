@@ -12,7 +12,7 @@ use ark_bn254::{Fq, Fr};
 use ark_ec::{AffineRepr, CurveGroup, PrimeGroup};
 use ark_ff::{BigInteger, PrimeField, Zero};
 use ark_grumpkin::{Affine as G2Affine, Projective as G2};
-use axum::extract::State as AxumState;
+use axum::extract::{Path, State as AxumState};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -21,13 +21,14 @@ use folding_schemes::frontend::FCircuit;
 
 use crate::burn::{address_to_fr, recipient, trim_to_160};
 use crate::config::Config;
+use crate::db::{Db, Registration, fr_to_u256, unix_now};
 use crate::state::State;
 use crate::tree::{MerkleTree, TREE_CAPACITY, TREE_DEPTH};
 use crate::zkp::{
     RootTransitionCircuit, RootTransitionWitness, WithdrawCircuit, WithdrawWitness,
     prove_root_transition, prove_withdraw,
 };
-use crate::zkp::{poseidon2, poseidon4};
+use crate::zkp::{poseidon2, poseidon3, poseidon4};
 
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 value);
@@ -46,6 +47,12 @@ sol! {
 }
 
 type SharedState = Arc<Mutex<State>>;
+
+#[derive(Clone)]
+struct AppState {
+    state: SharedState,
+    db: Db,
+}
 
 fn u256_to_fr(v: U256) -> Fr {
     let bytes: [u8; 32] = v.to_be_bytes();
@@ -111,6 +118,7 @@ fn apply_transfer(
     let leaf = poseidon2(to_fr, value)?;
     s.tree.insert(leaf);
     s.chain.apply(to, value);
+    *s.credits.entry(to).or_default() += fr_to_u256(value);
     if s.pubkey_by_addr.contains_key(&to) {
         let root_index = s.finalized_trees.len();
         s.deposits
@@ -127,19 +135,21 @@ fn log_recipient(state: &SharedState) {
     println!("recipient = {}", r);
 }
 
-fn spawn_http_server(state: SharedState, port: u16) {
+fn spawn_http_server(app: AppState, port: u16) {
     tokio::spawn(async move {
-        let app = Router::new()
+        let router = Router::new()
             .route("/health", get(health))
             .route("/recipient", get(current_recipient))
             .route("/register", post(register))
             .route("/deposits", get(deposits))
+            .route("/balance/:pubkey_x", get(balance))
+            .route("/cards", post(order_card))
             .route("/status", get(status))
-            .with_state(state);
+            .with_state(app);
         let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
             .await
             .unwrap();
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(listener, router).await.unwrap();
     });
 }
 
@@ -157,8 +167,34 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         exchange_addr,
     )?));
 
+    let db = Db::open(&config.db_path).await?;
+
+    // Hydrate in-memory auth maps from the durable log.
+    {
+        let regs = db.latest_registrations().await?;
+        let mut s = state.lock().unwrap();
+        for r in &regs {
+            let pk = G2Affine::new_unchecked(r.pubkey_x, r.pubkey_y);
+            let rr = G2Affine::new_unchecked(r.sig_r_x, r.sig_r_y);
+            if !(pk.is_on_curve() && rr.is_on_curve()) {
+                eprintln!("skipping invalid registration 0x{}", hex::encode(r.address));
+                continue;
+            }
+            s.pubkey_by_addr.insert(r.address, G2::from(pk));
+            s.sig_by_addr
+                .insert(r.address, (G2::from(rr), r.sig_z, Fr::from(r.expiry)));
+        }
+        println!("hydrated {} registrations", regs.len());
+    }
+
     log_recipient(&state);
-    spawn_http_server(state.clone(), config.port);
+    spawn_http_server(
+        AppState {
+            state: state.clone(),
+            db,
+        },
+        config.port,
+    );
 
     let mut last_block = catch_up(&state, &provider, &config).await?;
 
@@ -204,8 +240,8 @@ async fn indexer_step(
     Ok(latest)
 }
 
-async fn deposits(AxumState(state): AxumState<SharedState>) -> impl IntoResponse {
-    let s = state.lock().unwrap();
+async fn deposits(AxumState(app): AxumState<AppState>) -> impl IntoResponse {
+    let s = app.state.lock().unwrap();
     let list: Vec<_> = s
         .deposits
         .iter()
@@ -429,8 +465,8 @@ async fn health() -> &'static str {
     "ok"
 }
 
-async fn current_recipient(AxumState(state): AxumState<SharedState>) -> impl IntoResponse {
-    let s = state.lock().unwrap();
+async fn current_recipient(AxumState(app): AxumState<AppState>) -> impl IntoResponse {
+    let s = app.state.lock().unwrap();
     let r = recipient(s.chain_id, s.exchange_addr, s.tweak);
     Json(serde_json::json!({ "recipient": r.to_string() })).into_response()
 }
@@ -461,16 +497,16 @@ fn parse_decimal_fq(s: &str) -> Result<Fq, String> {
 }
 
 async fn register(
-    AxumState(state): AxumState<SharedState>,
+    AxumState(app): AxumState<AppState>,
     Json(req): Json<RegisterReq>,
 ) -> impl IntoResponse {
-    match register_inner(&state, req) {
+    match register_inner(&app, req).await {
         Ok(()) => (StatusCode::OK, "registered").into_response(),
         Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
     }
 }
 
-fn register_inner(state: &SharedState, req: RegisterReq) -> Result<(), String> {
+async fn register_inner(app: &AppState, req: RegisterReq) -> Result<(), String> {
     let addr = parse_hex20(&req.address)?;
     let pk = G2Affine::new_unchecked(
         parse_decimal_fr(&req.pubkey.0)?,
@@ -493,7 +529,7 @@ fn register_inner(state: &SharedState, req: RegisterReq) -> Result<(), String> {
     let expiry = parse_decimal_fr(&req.expiry)?;
 
     let (recipient, burn_index) = {
-        let s = state.lock().unwrap();
+        let s = app.state.lock().unwrap();
         (
             recipient(s.chain_id, s.exchange_addr, s.tweak),
             s.chain.index(),
@@ -518,14 +554,161 @@ fn register_inner(state: &SharedState, req: RegisterReq) -> Result<(), String> {
         return Err("bad signature".into());
     }
 
-    let mut s = state.lock().unwrap();
+    let limbs = expiry.into_bigint();
+    if limbs.0[1..].iter().any(|l| *l != 0) {
+        return Err("expiry too large".into());
+    }
+    let rec = Registration {
+        address: addr,
+        created_at: unix_now(),
+        pubkey_x: pk.x,
+        pubkey_y: pk.y,
+        sig_r_x: r.x,
+        sig_r_y: r.y,
+        sig_z: z,
+        expiry: limbs.0[0],
+        recipient,
+    };
+    app.db
+        .insert_registration(&rec)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut s = app.state.lock().unwrap();
     s.pubkey_by_addr.insert(addr, G2::from(pk));
     s.sig_by_addr.insert(addr, (G2::from(r), z, expiry));
     Ok(())
 }
 
-async fn status(AxumState(state): AxumState<SharedState>) -> impl IntoResponse {
-    let s = state.lock().unwrap();
+async fn balance(AxumState(app): AxumState<AppState>, Path(pk): Path<String>) -> impl IntoResponse {
+    let pk_x = match parse_decimal_fr(&pk) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let deposited = {
+        let s = app.state.lock().unwrap();
+        let mut total = U256::ZERO;
+        for (addr, sum) in &s.credits {
+            if s.pubkey_by_addr.get(addr).map(|p| p.into_affine().x) == Some(pk_x) {
+                total += *sum;
+            }
+        }
+        total
+    };
+    match app.db.total_spent(pk_x).await {
+        Ok(spent) => Json(serde_json::json!({
+            "pubkey_x": pk,
+            "deposited": deposited.to_string(),
+            "spent": spent.to_string(),
+            "balance": deposited.saturating_sub(spent).to_string(),
+        }))
+        .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct CardOrderReq {
+    pubkey_x: String, // decimal
+    amount: String,   // decimal token units
+    deadline: String, // decimal: order sig valid while burn_index <= deadline
+    sig_r: (String, String),
+    sig_z: String,
+}
+
+async fn order_card(
+    AxumState(app): AxumState<AppState>,
+    Json(req): Json<CardOrderReq>,
+) -> impl IntoResponse {
+    match order_card_inner(&app, req).await {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+async fn order_card_inner(app: &AppState, req: CardOrderReq) -> Result<serde_json::Value, String> {
+    let pk_x = parse_decimal_fr(&req.pubkey_x)?;
+    let amount = parse_decimal_fr(&req.amount)?;
+    let deadline = parse_decimal_fr(&req.deadline)?;
+    let r = G2Affine::new_unchecked(
+        parse_decimal_fr(&req.sig_r.0)?,
+        parse_decimal_fr(&req.sig_r.1)?,
+    );
+    if !r.is_on_curve() {
+        return Err("sig_r not on curve".into());
+    }
+    let z = parse_decimal_fq(&req.sig_z)?;
+
+    let reg = app
+        .db
+        .latest_registration_by_pubkey(pk_x)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "pubkey not registered".to_string())?;
+
+    // Ownership proof: z·G == R + e·P with e = poseidon3(R.x, P.x, poseidon2(amount, deadline)).
+    let pk = G2Affine::new_unchecked(reg.pubkey_x, reg.pubkey_y);
+    if !pk.is_on_curve() {
+        return Err("stored pubkey invalid".into());
+    }
+    let msg = poseidon2(amount, deadline).map_err(|e| e.to_string())?;
+    let e_fr = poseidon3(r.x, pk.x, msg).map_err(|e| e.to_string())?;
+    let e = Fq::from_be_bytes_mod_order(&e_fr.into_bigint().to_bytes_be());
+    if (G2::generator() * z).into_affine() != (G2::from(r) + G2::from(pk) * e).into_affine() {
+        return Err("bad order signature".into());
+    }
+
+    let (available, burn_index) = {
+        let s = app.state.lock().unwrap();
+        let mut total = U256::ZERO;
+        for (addr, sum) in &s.credits {
+            if s.pubkey_by_addr.get(addr).map(|p| p.into_affine().x) == Some(pk_x) {
+                total += *sum;
+            }
+        }
+        (total, s.chain.index())
+    };
+    if deadline < Fr::from(burn_index) {
+        return Err("order signature expired".into());
+    }
+    if deadline > Fr::from(burn_index + 1_000_000) {
+        return Err("deadline too far in the future".into());
+    }
+
+    let amount_u256 = fr_to_u256(amount);
+
+    // 1. reserve funds (status 'pending') — Err means insufficient balance
+    let provider_ref = format!("stub-{amount_u256}-{}", unix_now());
+    let new_spent = app
+        .db
+        .try_spend(pk_x, amount_u256, available, "stub", &provider_ref)
+        .await?;
+
+    // 2. provider call — stub always succeeds; real provider goes here
+    match Ok::<_, String>(()) {
+        Ok(()) => {
+            app.db
+                .settle_order(&provider_ref, "succeeded", None)
+                .await?;
+            Ok(serde_json::json!({
+                "amount": amount_u256.to_string(),
+                "provider": "stub",
+                "provider_ref": provider_ref,
+                "lifetime_spent": new_spent.to_string(),
+            }))
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            app.db
+                .settle_order(&provider_ref, "failed", Some(&msg))
+                .await?;
+            Err(format!("card provider failed: {msg}"))
+        }
+    }
+}
+
+async fn status(AxumState(app): AxumState<AppState>) -> impl IntoResponse {
+    let s = app.state.lock().unwrap();
     Json(serde_json::json!({
         "index": s.chain.index(),
         "root": s.tree.root().to_string(),

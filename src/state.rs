@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use alloy::primitives::U256;
 use ark_bn254::{Fq, Fr};
 use ark_grumpkin::Projective as G2;
 
@@ -21,6 +22,8 @@ pub struct State {
     /// All deposits per burn address: (value, root_index, tree_index) per deposit.
     pub deposits: HashMap<[u8; 20], Vec<(Fr, usize, usize)>>,
     pub pending: Option<(Vec<Fr>, Vec<RootTransitionWitness>)>,
+    /// Lifetime deposited value per address. Chain-derived; rebuilt by replay; never trimmed.
+    pub credits: HashMap<[u8; 20], U256>,
 }
 
 impl State {
@@ -31,6 +34,7 @@ impl State {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self {
             tree: MerkleTree::new(TREE_DEPTH),
+            credits: HashMap::new(),
             finalized_trees: Vec::new(),
             chain: HashChain::new(),
             chain_id,
