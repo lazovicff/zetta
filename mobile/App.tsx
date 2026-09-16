@@ -1,3 +1,5 @@
+import { Ionicons } from '@expo/vector-icons';
+import { BlurView } from 'expo-blur';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
@@ -7,13 +9,17 @@ import { HomeScreen } from './src/screens/HomeScreen';
 import { SettingsScreen } from './src/screens/SettingsScreen';
 import { getOrCreateIdentitySecret } from './src/storage';
 
-
 type Tab = 'home' | 'cards' | 'settings';
 
-const TABS: { id: Tab; label: string; icon: string }[] = [
-  { id: 'home', label: 'Home', icon: '🏠' },
-  { id: 'cards', label: 'Cards', icon: '💳' },
-  { id: 'settings', label: 'Settings', icon: '⚙️' },
+const TABS: {
+  id: Tab;
+  label: string;
+  icon: keyof typeof Ionicons.glyphMap;
+  iconActive: keyof typeof Ionicons.glyphMap;
+}[] = [
+  { id: 'home', label: 'Home', icon: 'home-outline', iconActive: 'home' },
+  { id: 'cards', label: 'Cards', icon: 'card-outline', iconActive: 'card' },
+  { id: 'settings', label: 'Settings', icon: 'settings-outline', iconActive: 'settings' },
 ];
 
 export default function App() {
@@ -33,15 +39,25 @@ export default function App() {
       {tab === 'cards' && <CardsScreen />}
       {tab === 'settings' && <SettingsScreen />}
 
-      <View style={styles.tabBar}>
-        {TABS.map((t) => (
-          <Pressable key={t.id} style={styles.tabItem} onPress={() => setTab(t.id)}>
-            <Text style={[styles.tabIcon, tab !== t.id && styles.tabInactive]}>{t.icon}</Text>
-            <Text style={[styles.tabLabel, tab === t.id && styles.tabLabelActive]}>
-              {t.label}
-            </Text>
-          </Pressable>
-        ))}
+      {/* floating frosted-glass tab bar */}
+      <View style={styles.tabBarWrap} pointerEvents="box-none">
+        <BlurView intensity={50} tint="dark" style={styles.tabBar}>
+          {TABS.map((t) => {
+            const active = tab === t.id;
+            return (
+              <Pressable key={t.id} style={styles.tabItem} onPress={() => setTab(t.id)}>
+                <Ionicons
+                  name={active ? t.iconActive : t.icon}
+                  size={22}
+                  color={active ? '#fff' : 'rgba(255,255,255,0.45)'}
+                />
+                <Text style={[styles.tabLabel, active && styles.tabLabelActive]}>
+                  {t.label}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </BlurView>
       </View>
     </View>
   );
@@ -49,17 +65,15 @@ export default function App() {
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#0e0e10' },
+  tabBarWrap: { position: 'absolute', left: 16, right: 16, bottom: 24 },
   tabBar: {
     flexDirection: 'row',
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: '#2c2c33',
-    backgroundColor: '#0e0e10',
-    paddingBottom: 24,
-    paddingTop: 8,
+    borderRadius: 24,
+    overflow: 'hidden', // clips the blur to the pill shape
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.08)',
   },
-  tabItem: { flex: 1, alignItems: 'center' },
-  tabIcon: { fontSize: 20 },
-  tabInactive: { opacity: 0.4 },
-  tabLabel: { color: '#777', fontSize: 11, marginTop: 2 },
+  tabItem: { flex: 1, alignItems: 'center', paddingVertical: 10 },
+  tabLabel: { color: 'rgba(255,255,255,0.45)', fontSize: 11, marginTop: 3 },
   tabLabelActive: { color: '#fff', fontWeight: '600' },
 });

@@ -3,6 +3,7 @@ import { FlatList, Pressable, RefreshControl, StyleSheet, Text, View } from 'rea
 
 import { CardView } from '../components/CardView';
 import { CreateCardSheet } from '../components/CreateCardSheet';
+import { CardDetailScreen } from './CardDetailScreen';
 import { listCards } from '../storage';
 import type { CardEntry } from '../types';
 
@@ -10,6 +11,7 @@ export function CardsScreen() {
   const [cards, setCards] = useState<CardEntry[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [sheetOpen, setSheetOpen] = useState(false);
+  const [selected, setSelected] = useState<CardEntry | null>(null);
 
   const reload = useCallback(async () => {
     setCards(await listCards());
@@ -18,6 +20,10 @@ export function CardsScreen() {
   useEffect(() => {
     reload();
   }, [reload]);
+
+  if (selected) {
+    return <CardDetailScreen card={selected} onBack={() => setSelected(null)} />;
+  }
 
   return (
     <View style={styles.root}>
@@ -31,7 +37,7 @@ export function CardsScreen() {
       <FlatList
         data={cards}
         keyExtractor={(c) => c.id}
-        renderItem={({ item }) => <CardView card={item} />}
+        renderItem={({ item }) => <CardView card={item} onPress={() => setSelected(item)} />}
         ListEmptyComponent={
           <Text style={styles.empty}>No cards yet.{'\n'}Create one to start spending.</Text>
         }

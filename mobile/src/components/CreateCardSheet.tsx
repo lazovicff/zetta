@@ -22,6 +22,14 @@ function stubCardNumber(): string {
   return '4' + [...buf].map((b) => (b % 10).toString()).join('');
 }
 
+/** Placeholder 3-digit CVC. */
+function stubCvc(): string {
+  const buf = new Uint8Array(3);
+  crypto.getRandomValues(buf);
+  return [...buf].map((b) => (b % 10).toString()).join('');
+}
+
+
 const CARD_LIFETIME_MS = 3 * 365 * 24 * 3600 * 1000; // 3y, local convention
 
 export function CreateCardSheet({
@@ -78,12 +86,14 @@ export function CreateCardSheet({
         id: res.provider_ref,
         name: name.trim(),
         number: stubCardNumber(),
+        cvc: stubCvc(),
         amountWei: amountWei.toString(10),
         spentWei: '0',
         pubkeyX: pubkeyX.toString(10),
         createdAt: now,
         expiresAt: now + CARD_LIFETIME_MS,
       });
+
       await onCreated();
       onClose();
     } catch (e) {

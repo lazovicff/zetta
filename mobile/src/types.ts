@@ -45,3 +45,16 @@ export interface HistoryItem {
   amountWei: bigint;
   at: number; // unix ms
 }
+
+export interface CardEntry {
+  id: string;
+  name: string;
+  number: string;
+  amountWei: string;
+  spentWei: string;
+  pubkeyX: string;
+  /** 3-digit CVC — STUB. Random at creation; legacy cards derive from id. */
+  cvc?: string;
+  createdAt: number;
+  expiresAt: number;
+}

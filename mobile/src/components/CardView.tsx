@@ -1,4 +1,4 @@
-import { StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { formatUsd } from '../format';
 import type { CardEntry } from '../types';
@@ -13,7 +13,7 @@ function Bar({ frac, color }: { frac: number; color: string }) {
   );
 }
 
-export function CardView({ card }: { card: CardEntry }) {
+export function CardView({ card, onPress }: { card: CardEntry; onPress?: () => void }) {
   const total = BigInt(card.amountWei);
   const left = total - BigInt(card.spentWei);
   const fundsFrac = total === 0n ? 0 : Number((left * 10_000n) / total) / 10_000;
@@ -25,7 +25,10 @@ export function CardView({ card }: { card: CardEntry }) {
   const masked = `${card.number.slice(0, 4)} •••• •••• ${card.number.slice(-4)}`;
 
   return (
-    <View style={styles.card}>
+    <Pressable
+      style={({ pressed }) => [styles.card, pressed && styles.dim]}
+      onPress={onPress}
+    >
       <View style={styles.topRow}>
         <Text style={styles.name} numberOfLines={1}>
           {card.name}
@@ -42,7 +45,7 @@ export function CardView({ card }: { card: CardEntry }) {
         <Text style={styles.barLabel}>expires {expStr}</Text>
         <Bar frac={lifeFrac} color="#7d7d86" />
       </View>
-    </View>
+    </Pressable>
   );
 }
 
@@ -61,4 +64,5 @@ const styles = StyleSheet.create({
   barLabel: { color: '#888', fontSize: 11, marginBottom: 4 },
   track: { height: 5, borderRadius: 3, backgroundColor: '#33333c', overflow: 'hidden' },
   fill: { height: 5, borderRadius: 3 },
+  dim: { opacity: 0.6 },
 });
