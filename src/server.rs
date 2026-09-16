@@ -167,7 +167,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         exchange_addr,
     )?));
 
-    let db = Db::open(&config.db_path).await?;
+    let db = Db::open(&config.database_url).await?;
 
     // Hydrate in-memory auth maps from the durable log.
     {

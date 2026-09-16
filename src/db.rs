@@ -1,12 +1,13 @@
-//! Durable append-only log: registrations + card orders (SQLite).
+//! Durable append-only log: registrations + card orders (PostgreSQL).
 //! Tables are created externally. Deposits are NOT stored here —
 //! they are chain facts, rebuilt by replay.
 
 use alloy::primitives::U256;
 use ark_bn254::{Fq, Fr};
 use ark_ff::{BigInteger, PrimeField};
-use sqlx::sqlite::SqliteConnectOptions;
-use sqlx::{Row, SqlitePool};
+use sqlx::{PgPool, Row};
+
+use crate::ids::user_id;
 
 pub fn fr_to_blob<F: PrimeField>(x: F) -> Vec<u8> {
     x.into_bigint().to_bytes_be()
@@ -31,6 +32,9 @@ pub fn unix_now() -> i64 {
         .as_secs() as i64
 }
 
+/// Global advisory-lock key serializing spends (replaces SQLite's BEGIN IMMEDIATE).
+const SPEND_LOCK_KEY: i64 = 0x5A45_5454_41; // "ZETTA"
+
 #[derive(Clone, Debug)]
 pub struct Registration {
     pub address: [u8; 20],
@@ -46,11 +50,11 @@ pub struct Registration {
 }
 
 #[derive(Clone)]
-pub struct Db(SqlitePool);
+pub struct Db(PgPool);
 
 const REG_COLS: &str = "burn_address, created_at, pubkey_x, pubkey_y, sig_r_x, sig_r_y, sig_z, salt, recipient, user_id";
 
-fn row_to_registration(row: &sqlx::sqlite::SqliteRow) -> Result<Registration, sqlx::Error> {
+fn row_to_registration(row: &sqlx::postgres::PgRow) -> Result<Registration, sqlx::Error> {
     let addr: Vec<u8> = row.try_get("burn_address")?;
     let address: [u8; 20] = addr
         .try_into()
@@ -58,23 +62,20 @@ fn row_to_registration(row: &sqlx::sqlite::SqliteRow) -> Result<Registration, sq
     Ok(Registration {
         address,
         created_at: row.try_get("created_at")?,
-        pubkey_x: blob_to_fr(row.try_get::<&[u8], _>("pubkey_x")?),
-        pubkey_y: blob_to_fr(row.try_get::<&[u8], _>("pubkey_y")?),
-        sig_r_x: blob_to_fr(row.try_get::<&[u8], _>("sig_r_x")?),
-        sig_r_y: blob_to_fr(row.try_get::<&[u8], _>("sig_r_y")?),
-        sig_z: blob_to_fr(row.try_get::<&[u8], _>("sig_z")?),
-        salt: blob_to_fr(row.try_get::<&[u8], _>("salt")?),
-        recipient: blob_to_fr(row.try_get::<&[u8], _>("recipient")?),
+        pubkey_x: blob_to_fr(&row.try_get::<Vec<u8>, _>("pubkey_x")?),
+        pubkey_y: blob_to_fr(&row.try_get::<Vec<u8>, _>("pubkey_y")?),
+        sig_r_x: blob_to_fr(&row.try_get::<Vec<u8>, _>("sig_r_x")?),
+        sig_r_y: blob_to_fr(&row.try_get::<Vec<u8>, _>("sig_r_y")?),
+        sig_z: blob_to_fr(&row.try_get::<Vec<u8>, _>("sig_z")?),
+        salt: blob_to_fr(&row.try_get::<Vec<u8>, _>("salt")?),
+        recipient: blob_to_fr(&row.try_get::<Vec<u8>, _>("recipient")?),
         user_id: row.try_get("user_id")?,
     })
 }
 
 impl Db {
-    pub async fn open(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let opts = SqliteConnectOptions::new()
-            .filename(path)
-            .create_if_missing(true);
-        let pool = SqlitePool::connect_with(opts).await?;
+    pub async fn open(url: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let pool = PgPool::connect(url).await?;
         Ok(Self(pool))
     }
 
@@ -83,7 +84,7 @@ impl Db {
         r: &Registration,
     ) -> Result<(), Box<dyn std::error::Error>> {
         sqlx::query(&format!(
-            "INSERT INTO registrations ({REG_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+            "INSERT INTO registrations ({REG_COLS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"
         ))
         .bind(r.address.as_slice())
         .bind(r.created_at)
@@ -125,7 +126,7 @@ impl Db {
     ) -> Result<Option<Registration>, Box<dyn std::error::Error>> {
         let row = sqlx::query(&format!(
             "SELECT {REG_COLS} FROM registrations
-             WHERE pubkey_x = ?1 ORDER BY created_at DESC LIMIT 1"
+             WHERE pubkey_x = $1 ORDER BY created_at DESC LIMIT 1"
         ))
         .bind(fr_to_blob(pubkey_x))
         .fetch_optional(&self.0)
@@ -142,7 +143,7 @@ impl Db {
     ) -> Result<Option<Registration>, Box<dyn std::error::Error>> {
         let row = sqlx::query(&format!(
             "SELECT {REG_COLS} FROM registrations
-             WHERE user_id = ?1 ORDER BY created_at DESC LIMIT 1"
+             WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1"
         ))
         .bind(user_id)
         .fetch_optional(&self.0)
@@ -155,14 +156,21 @@ impl Db {
 
     pub async fn total_spent(&self, pubkey_x: Fr) -> Result<U256, Box<dyn std::error::Error>> {
         let rows = sqlx::query(
-            "SELECT amount FROM card_orders WHERE pubkey_x = ?1 AND status != 'failed'",
+            "SELECT DISTINCT ON (provider_ref) amount, status
+             FROM card_orders
+             WHERE pubkey_x = $1
+             ORDER BY provider_ref, id DESC",
         )
         .bind(fr_to_blob(pubkey_x))
         .fetch_all(&self.0)
         .await?;
         let mut total = U256::ZERO;
         for r in &rows {
-            total += blob_to_u256(r.try_get::<&[u8], _>("amount")?);
+            let status: String = r.try_get("status")?;
+            if status != "failed" {
+                let amount: Vec<u8> = r.try_get("amount")?;
+                total += blob_to_u256(&amount);
+            }
         }
         Ok(total)
     }
@@ -178,23 +186,33 @@ impl Db {
         provider: &str,
         provider_ref: &str,
     ) -> Result<U256, String> {
-        // BEGIN IMMEDIATE = single writer: no spend can slip between check and insert.
-        let mut tx = self
-            .0
-            .begin_with("BEGIN IMMEDIATE")
+        // A global advisory xact lock replaces SQLite's BEGIN IMMEDIATE: no two
+        // orders can pass the balance check concurrently.
+        let mut tx = self.0.begin().await.map_err(|e| e.to_string())?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(SPEND_LOCK_KEY)
+            .execute(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
 
         let rows = sqlx::query(
-            "SELECT amount FROM card_orders WHERE pubkey_x = ?1 AND status != 'failed'",
+            "SELECT DISTINCT ON (provider_ref) amount, status
+             FROM card_orders
+             WHERE pubkey_x = $1
+             ORDER BY provider_ref, id DESC",
         )
         .bind(fr_to_blob(pubkey_x))
         .fetch_all(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
+
         let mut spent = U256::ZERO;
         for r in &rows {
-            spent += blob_to_u256(r.try_get::<&[u8], _>("amount").map_err(|e| e.to_string())?);
+            let status: String = r.try_get("status").map_err(|e| e.to_string())?;
+            if status != "failed" {
+                let amount: Vec<u8> = r.try_get("amount").map_err(|e| e.to_string())?;
+                spent += blob_to_u256(&amount);
+            }
         }
 
         let new_spent = spent + amount;
@@ -206,29 +224,24 @@ impl Db {
 
         let amount_bytes: [u8; 32] = amount.to_be_bytes();
         sqlx::query(
-            "INSERT INTO card_orders (pubkey_x, amount, provider, provider_ref, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO card_orders (pubkey_x, user_id, amount, provider, provider_ref, status, created_at)
+             VALUES ($1, $2, $3, $4, $5, 'pending', $6)",
         )
         .bind(fr_to_blob(pubkey_x))
+        .bind(user_id(pubkey_x))
         .bind(amount_bytes.as_slice())
         .bind(provider)
         .bind(provider_ref)
         .bind(unix_now())
         .execute(&mut *tx)
         .await
-        .map_err(|e| {
-            if e.to_string().contains("UNIQUE") {
-                "duplicate provider_ref".to_string()
-            } else {
-                e.to_string()
-            }
-        })?;
+        .map_err(|e| e.to_string())?;
 
         tx.commit().await.map_err(|e| e.to_string())?;
         Ok(new_spent)
     }
 
-    /// Move an order out of 'pending'. Only pending → succeeded|failed is legal.
+    /// Append a 'succeeded'/'failed' transition to an order still in 'pending'.
     pub async fn settle_order(
         &self,
         provider_ref: &str,
@@ -236,8 +249,12 @@ impl Db {
         error: Option<&str>,
     ) -> Result<(), String> {
         let res = sqlx::query(
-            "UPDATE card_orders SET status = ?1, error = ?2, resolved_at = ?3
-             WHERE provider_ref = ?4 AND status = 'pending'",
+            "INSERT INTO card_orders (pubkey_x, user_id, amount, provider, provider_ref, status, error, created_at, resolved_at)
+             SELECT pubkey_x, user_id, amount, provider, provider_ref, $1, $2, created_at, $3
+             FROM card_orders
+             WHERE provider_ref = $4
+               AND id = (SELECT MAX(id) FROM card_orders WHERE provider_ref = $4)
+               AND status = 'pending'",
         )
         .bind(status)
         .bind(error)
