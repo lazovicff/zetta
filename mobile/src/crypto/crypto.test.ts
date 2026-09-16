@@ -25,13 +25,15 @@ describe('keys + schnorr', () => {
     const x = randomScalar();
     const P = pubkey(x);
     const recipient = 123456789n;
-    const expiry = 1000n;
-    const sig = schnorrSign(x, recipient, expiry);
+    const sig = schnorrSign(x, recipient);
 
-    expect(schnorrVerify(P, sig, recipient, expiry)).toBe(true);
+    expect(schnorrVerify(P, sig, recipient)).toBe(true);
     // wrong recipient epoch -> invalid (binds signature to the server's current tweak)
-    expect(schnorrVerify(P, sig, recipient + 1n, expiry)).toBe(false);
-    expect(schnorrVerify(P, sig, recipient, expiry + 1n)).toBe(false);
+    expect(schnorrVerify(P, sig, recipient + 1n)).toBe(false);
+  });
+
+  it('is 0x + 40 hex chars', () => {
+    expect(burnAddress(1n, 1n, 1n)).toMatch(/^0x[0-9a-f]{40}$/);
   });
 
   it('rejects out-of-range secrets', () => {
@@ -51,6 +53,6 @@ describe('poseidon compat', () => {
 
 describe('burnAddress', () => {
   it('is 0x + 40 hex chars', () => {
-    expect(burnAddress(1n, 1n)).toMatch(/^0x[0-9a-f]{40}$/);
+    expect(burnAddress(1n, 1n, 1n)).toMatch(/^0x[0-9a-f]{40}$/);
   });
 });

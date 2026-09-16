@@ -17,8 +17,10 @@ pub struct State {
     pub tweak: [u8; 32],
     /// Registered burn-address pubkeys (P = x·G).
     pub pubkey_by_addr: HashMap<[u8; 20], G2>,
-    /// Schnorr authorization per burn address: (R, z, expiry).
-    pub sig_by_addr: HashMap<[u8; 20], (G2, Fq, Fr)>,
+    /// Schnorr authorization per burn address: (R, z).
+    pub sig_by_addr: HashMap<[u8; 20], (G2, Fq)>,
+    /// Burn-address derivation salt: burn = poseidon3(recipient, P.x, salt).
+    pub salt_by_addr: HashMap<[u8; 20], Fr>,
     /// All deposits per burn address: (value, root_index, tree_index) per deposit.
     pub deposits: HashMap<[u8; 20], Vec<(Fr, usize, usize)>>,
     pub pending: Option<(Vec<Fr>, Vec<RootTransitionWitness>)>,
@@ -42,6 +44,7 @@ impl State {
             tweak: config.tweak,
             pubkey_by_addr: HashMap::new(),
             sig_by_addr: HashMap::new(),
+            salt_by_addr: HashMap::new(),
             deposits: HashMap::new(),
             pending: None,
         })

@@ -72,12 +72,10 @@ contract Verifier {
 
         uint256 recipient = computeRecipient(chainId, addr, tweak);
 
-        uint256 expiry = proof[1];
         uint256 root = proof[3];          // z0[2] = transferRoot
         uint256 proofRecipient = proof[4]; // z0[3] = recipient
         uint256 sum = proof[6];           // zi[1] = sum
 
-        require(expiry == rootIndex * TREE_CAPACITY, "index offset mismatch");
         require(root == transferRoots[rootIndex], "unknown root");
         require(proofRecipient == recipient, "recipient mismatch");
 

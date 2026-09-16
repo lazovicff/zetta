@@ -1,7 +1,7 @@
 use std::borrow::Borrow;
 
 use crate::zkp::{merkle_root_var, poseidon2_var};
-use crate::{tree::TREE_DEPTH, zkp::poseidon4_var};
+use crate::{tree::TREE_DEPTH, zkp::poseidon3_var};
 use ark_bn254::{Fq, Fr};
 use ark_ec::PrimeGroup;
 use ark_ff::{BigInteger, PrimeField, Zero};
@@ -23,9 +23,9 @@ pub struct WithdrawWitness {
     pub pubkey: G2, // P = x·G
     pub sig_r: G2,  // R = k·G
     pub sig_z: Fq,  // z = k + e·x  (grumpkin scalar == bn254 Fq, NOT Fr)
+    pub salt: Fr,   // burn address nonce: burn = poseidon3(recipient, P.x, salt)
     pub value: Fr,
     pub index: Fr,
-    pub expiry: Fr,
     pub merkle_path: [Fr; TREE_DEPTH],
 }
 
@@ -35,9 +35,9 @@ impl Default for WithdrawWitness {
             pubkey: G2::zero(),
             sig_r: G2::zero(),
             sig_z: Fq::zero(),
+            salt: Fr::zero(),
             value: Fr::zero(),
             index: Fr::zero(),
-            expiry: Fr::zero(),
             merkle_path: [Fr::zero(); TREE_DEPTH],
         }
     }
@@ -47,10 +47,10 @@ impl Default for WithdrawWitness {
 pub struct WithdrawWitnessVar {
     pub pubkey: GVar,
     pub sig_r: GVar,
-    pub sig_z_bits: Vec<Boolean<Fr>>, // z decomposed off-circuit (free)
+    pub sig_z_bits: Vec<Boolean<Fr>>,
+    pub salt: FpVar<Fr>,
     pub value: FpVar<Fr>,
     pub index: FpVar<Fr>,
-    pub expiry: FpVar<Fr>,
     pub merkle_path: [FpVar<Fr>; TREE_DEPTH],
 }
 
@@ -79,9 +79,9 @@ impl AllocVar<WithdrawWitness, Fr> for WithdrawWitnessVar {
             pubkey,
             sig_r,
             sig_z_bits,
+            salt: FpVar::<Fr>::new_variable(cs.clone(), || Ok(w.salt), mode)?,
             value: FpVar::<Fr>::new_variable(cs.clone(), || Ok(w.value), mode)?,
             index: FpVar::<Fr>::new_variable(cs.clone(), || Ok(w.index), mode)?,
-            expiry: FpVar::<Fr>::new_variable(cs.clone(), || Ok(w.expiry), mode)?,
             merkle_path: <[FpVar<Fr>; TREE_DEPTH] as AllocVar<[Fr; TREE_DEPTH], Fr>>::new_variable(
                 cs.clone(),
                 || Ok(w.merkle_path),
@@ -91,18 +91,11 @@ impl AllocVar<WithdrawWitness, Fr> for WithdrawWitnessVar {
     }
 }
 
-/// e = poseidon4(R.x, pk.x, recipient, expiry) over Fr.
-/// The expiry is bound into the signature, so the user can't pick it at
-/// proving time.
-fn challenge(
-    pk: &GVar,
-    r: &GVar,
-    recipient: FpVar<Fr>,
-    expiry: FpVar<Fr>,
-) -> Result<FpVar<Fr>, SynthesisError> {
+/// e = poseidon3(R.x, pk.x, recipient) over Fr.
+fn challenge(pk: &GVar, r: &GVar, recipient: FpVar<Fr>) -> Result<FpVar<Fr>, SynthesisError> {
     let r_aff = r.to_affine()?;
     let pk_aff = pk.to_affine()?;
-    poseidon4_var(r_aff.x, pk_aff.x, recipient, expiry)
+    poseidon3_var(r_aff.x, pk_aff.x, recipient)
 }
 
 /// require z·G − e·P == R
@@ -111,9 +104,8 @@ fn schnorr_verify(
     r: &GVar,
     z_bits: &[Boolean<Fr>],
     recipient: FpVar<Fr>,
-    expiry: FpVar<Fr>,
 ) -> Result<(), SynthesisError> {
-    let e = challenge(pk, r, recipient, expiry)?;
+    let e = challenge(pk, r, recipient)?;
     let e_bits = e.to_bits_le()?;
 
     let g = GVar::constant(G2::generator());
@@ -156,23 +148,19 @@ impl FCircuit<Fr> for WithdrawCircuit {
         let pubkey = &external_inputs.pubkey;
         let sig_r = &external_inputs.sig_r;
         let sig_z_bits = &external_inputs.sig_z_bits;
-        let expiry = external_inputs.expiry;
+        let salt = external_inputs.salt;
         let value = external_inputs.value;
         let index = external_inputs.index; // GLOBAL burn index
         let merkle_path = &external_inputs.merkle_path;
 
-        // address = low160(poseidon2(recipient, x(P)))
+        // address = low160(poseidon3(recipient, x(P), salt))
         let pk_aff = pubkey.to_affine()?;
-        let burn = poseidon2_var(recipient.clone(), pk_aff.x)?;
+        let burn = poseidon3_var(recipient.clone(), pk_aff.x, salt)?;
         let burn_bits = burn.to_bits_le()?;
         let address = Boolean::le_bits_to_fp(&burn_bits[0..160])?;
 
         // Schnorr verify (proves the user authorized this address)
-        schnorr_verify(pubkey, sig_r, sig_z_bits, recipient.clone(), expiry.clone())?;
-
-        // signature only authorizes deposits at global index <= expiry
-        let until = expiry - index.clone();
-        let _ = until.to_bits_le_with_top_bits_zero(40)?;
+        schnorr_verify(pubkey, sig_r, sig_z_bits, recipient.clone())?;
 
         // leaf = poseidon2(address, value)
         let leaf = poseidon2_var(address, value.clone())?;

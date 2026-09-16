@@ -40,22 +40,21 @@ pub struct Registration {
     pub sig_r_x: Fr,
     pub sig_r_y: Fr,
     pub sig_z: Fq,
-    pub expiry: u64,
+    pub salt: Fr,
     pub recipient: Fr,
+    pub user_id: String,
 }
 
 #[derive(Clone)]
 pub struct Db(SqlitePool);
 
-const REG_COLS: &str =
-    "burn_address, created_at, pubkey_x, pubkey_y, sig_r_x, sig_r_y, sig_z, expiry, recipient";
+const REG_COLS: &str = "burn_address, created_at, pubkey_x, pubkey_y, sig_r_x, sig_r_y, sig_z, salt, recipient, user_id";
 
 fn row_to_registration(row: &sqlx::sqlite::SqliteRow) -> Result<Registration, sqlx::Error> {
     let addr: Vec<u8> = row.try_get("burn_address")?;
     let address: [u8; 20] = addr
         .try_into()
         .map_err(|_| sqlx::Error::Decode("bad address length".into()))?;
-    let expiry: i64 = row.try_get("expiry")?;
     Ok(Registration {
         address,
         created_at: row.try_get("created_at")?,
@@ -64,8 +63,9 @@ fn row_to_registration(row: &sqlx::sqlite::SqliteRow) -> Result<Registration, sq
         sig_r_x: blob_to_fr(row.try_get::<&[u8], _>("sig_r_x")?),
         sig_r_y: blob_to_fr(row.try_get::<&[u8], _>("sig_r_y")?),
         sig_z: blob_to_fr(row.try_get::<&[u8], _>("sig_z")?),
-        expiry: expiry as u64,
+        salt: blob_to_fr(row.try_get::<&[u8], _>("salt")?),
         recipient: blob_to_fr(row.try_get::<&[u8], _>("recipient")?),
+        user_id: row.try_get("user_id")?,
     })
 }
 
@@ -83,7 +83,7 @@ impl Db {
         r: &Registration,
     ) -> Result<(), Box<dyn std::error::Error>> {
         sqlx::query(&format!(
-            "INSERT INTO registrations ({REG_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+            "INSERT INTO registrations ({REG_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
         ))
         .bind(r.address.as_slice())
         .bind(r.created_at)
@@ -92,8 +92,9 @@ impl Db {
         .bind(fr_to_blob(r.sig_r_x))
         .bind(fr_to_blob(r.sig_r_y))
         .bind(fr_to_blob(r.sig_z))
-        .bind(r.expiry as i64)
+        .bind(fr_to_blob(r.salt))
         .bind(fr_to_blob(r.recipient))
+        .bind(&r.user_id)
         .execute(&self.0)
         .await?;
         Ok(())
@@ -127,6 +128,23 @@ impl Db {
              WHERE pubkey_x = ?1 ORDER BY created_at DESC LIMIT 1"
         ))
         .bind(fr_to_blob(pubkey_x))
+        .fetch_optional(&self.0)
+        .await?;
+        row.as_ref()
+            .map(row_to_registration)
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    pub async fn latest_registration_by_user_id(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<Registration>, Box<dyn std::error::Error>> {
+        let row = sqlx::query(&format!(
+            "SELECT {REG_COLS} FROM registrations
+             WHERE user_id = ?1 ORDER BY created_at DESC LIMIT 1"
+        ))
+        .bind(user_id)
         .fetch_optional(&self.0)
         .await?;
         row.as_ref()

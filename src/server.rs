@@ -28,7 +28,7 @@ use crate::zkp::{
     RootTransitionCircuit, RootTransitionWitness, WithdrawCircuit, WithdrawWitness,
     prove_root_transition, prove_withdraw,
 };
-use crate::zkp::{poseidon2, poseidon3, poseidon4};
+use crate::zkp::{poseidon2, poseidon3};
 
 sol! {
     event Transfer(address indexed from, address indexed to, uint256 value);
@@ -181,8 +181,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
             s.pubkey_by_addr.insert(r.address, G2::from(pk));
-            s.sig_by_addr
-                .insert(r.address, (G2::from(rr), r.sig_z, Fr::from(r.expiry)));
+            s.sig_by_addr.insert(r.address, (G2::from(rr), r.sig_z));
+            s.salt_by_addr.insert(r.address, r.salt);
         }
         println!("hydrated {} registrations", regs.len());
     }
@@ -301,7 +301,7 @@ async fn do_withdraw(
     };
     let recipient = recipient(chain_id, exchange_addr, tweak);
 
-    // Group deposits by rootIndex: (tree_index, P, R, z, value, expiry).
+    // Group deposits by rootIndex: (tree_index, P, R, z, salt, value).
     let mut by_tree: HashMap<usize, Vec<(usize, G2, G2, Fq, Fr, Fr)>> = HashMap::new();
     {
         let s = state.lock().unwrap();
@@ -310,23 +310,20 @@ async fn do_withdraw(
                 if *root_index >= s.finalized_trees.len() {
                     continue; // tree not finalized yet
                 }
-                let (Some(pubkey), Some((sig_r, sig_z, expiry))) =
-                    (s.pubkey_by_addr.get(addr), s.sig_by_addr.get(addr))
-                else {
+                let (Some(pubkey), Some((sig_r, sig_z)), Some(salt)) = (
+                    s.pubkey_by_addr.get(addr),
+                    s.sig_by_addr.get(addr),
+                    s.salt_by_addr.get(addr),
+                ) else {
                     continue;
                 };
-                let global_index = *root_index as u64 * TREE_CAPACITY as u64 + *tree_index as u64;
-                if Fr::from(global_index) > *expiry {
-                    println!("skipping receipt: index {global_index} past sig expiry");
-                    continue; // including it would make the whole batch unsatisfiable
-                }
                 by_tree.entry(*root_index).or_default().push((
                     *tree_index,
                     *pubkey,
                     *sig_r,
                     *sig_z,
+                    *salt,
                     *value,
-                    *expiry,
                 ));
             }
         }
@@ -343,7 +340,7 @@ async fn do_withdraw(
             let tree = &s.finalized_trees[root_index];
             let transfer_root = tree.root();
             let mut witnesses = Vec::with_capacity(receipts.len());
-            for (idx, pubkey, sig_r, sig_z, value, expiry) in receipts {
+            for (idx, pubkey, sig_r, sig_z, salt, value) in receipts {
                 let proof = tree.proof(idx);
                 let mut merkle_path = [Fr::zero(); TREE_DEPTH];
                 merkle_path.copy_from_slice(&proof);
@@ -351,9 +348,9 @@ async fn do_withdraw(
                     pubkey,
                     sig_r,
                     sig_z,
+                    salt,
                     value,
                     index: Fr::from(root_index as u64 * TREE_CAPACITY as u64 + idx as u64),
-                    expiry,
                     merkle_path,
                 });
             }
@@ -477,7 +474,7 @@ struct RegisterReq {
     pubkey: (String, String), // P = (x, y), decimal, grumpkin base field
     sig_r: (String, String),  // R = (x, y), decimal
     sig_z: String,            // z = k + e·x, decimal, grumpkin scalar field
-    expiry: String,           // max global burn index this signature authorizes, decimal
+    salt: String,             // burn preimage nonce, decimal
 }
 
 fn parse_hex20(s: &str) -> Result<[u8; 20], String> {
@@ -525,28 +522,21 @@ async fn register_inner(app: &AppState, req: RegisterReq) -> Result<(), String> 
     }
 
     let z = parse_decimal_fq(&req.sig_z)?;
+    let salt = parse_decimal_fr(&req.salt)?;
 
-    let expiry = parse_decimal_fr(&req.expiry)?;
-
-    let (recipient, burn_index) = {
+    let recipient = {
         let s = app.state.lock().unwrap();
-        (
-            recipient(s.chain_id, s.exchange_addr, s.tweak),
-            s.chain.index(),
-        )
+        recipient(s.chain_id, s.exchange_addr, s.tweak)
     };
-    if expiry < Fr::from(burn_index) {
-        return Err("expiry is behind the current burn index".into());
-    }
 
-    // Address must be derivable from the pubkey under the current recipient.
-    let derived = trim_to_160(poseidon2(recipient, pk.x).map_err(|e| e.to_string())?);
+    // Address must be derivable from (pubkey, salt) under the current recipient.
+    let derived = trim_to_160(poseidon3(recipient, pk.x, salt).map_err(|e| e.to_string())?);
     if derived != addr {
-        return Err("address does not match pubkey for current recipient".into());
+        return Err("address does not match (pubkey, salt) for current recipient".into());
     }
 
     // Schnorr: z·G == R + e·P with e = poseidon3(R.x, P.x, recipient).
-    let e_fr = poseidon4(r.x, pk.x, recipient, expiry).map_err(|e| e.to_string())?;
+    let e_fr = poseidon3(r.x, pk.x, recipient).map_err(|e| e.to_string())?;
     let e = Fq::from_be_bytes_mod_order(&e_fr.into_bigint().to_bytes_be());
     let lhs = (G2::generator() * z).into_affine();
     let rhs = (G2::from(r) + G2::from(pk) * e).into_affine();
@@ -554,10 +544,6 @@ async fn register_inner(app: &AppState, req: RegisterReq) -> Result<(), String> 
         return Err("bad signature".into());
     }
 
-    let limbs = expiry.into_bigint();
-    if limbs.0[1..].iter().any(|l| *l != 0) {
-        return Err("expiry too large".into());
-    }
     let rec = Registration {
         address: addr,
         created_at: unix_now(),
@@ -566,8 +552,9 @@ async fn register_inner(app: &AppState, req: RegisterReq) -> Result<(), String> 
         sig_r_x: r.x,
         sig_r_y: r.y,
         sig_z: z,
-        expiry: limbs.0[0],
+        salt,
         recipient,
+        user_id: crate::ids::user_id(pk.x),
     };
     app.db
         .insert_registration(&rec)
@@ -576,7 +563,8 @@ async fn register_inner(app: &AppState, req: RegisterReq) -> Result<(), String> 
 
     let mut s = app.state.lock().unwrap();
     s.pubkey_by_addr.insert(addr, G2::from(pk));
-    s.sig_by_addr.insert(addr, (G2::from(r), z, expiry));
+    s.sig_by_addr.insert(addr, (G2::from(r), z));
+    s.salt_by_addr.insert(addr, salt);
     Ok(())
 }
 

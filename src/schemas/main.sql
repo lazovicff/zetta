@@ -8,12 +8,14 @@ CREATE TABLE IF NOT EXISTS registrations (
     sig_r_x      BLOB NOT NULL CHECK (length(sig_r_x) = 32),
     sig_r_y      BLOB NOT NULL CHECK (length(sig_r_y) = 32),
     sig_z        BLOB NOT NULL CHECK (length(sig_z) = 32),
+    salt         BLOB NOT NULL CHECK (length(salt) = 32),
     recipient    BLOB NOT NULL CHECK (length(recipient) = 32),
-    expiry       INTEGER NOT NULL CHECK (expiry >= 0),   -- global burn index; u64-range forever
+    user_id      TEXT NOT NULL,
     PRIMARY KEY (burn_address, created_at)
 ) STRICT;
 
 CREATE INDEX idx_reg_current ON registrations(burn_address, created_at DESC);
+CREATE INDEX idx_reg_user_id ON registrations(user_id);
 
 -- SPEND: one row per issued card. One-way, so order == spend.
 CREATE TABLE IF NOT EXISTS card_orders (

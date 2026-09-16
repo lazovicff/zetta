@@ -11,8 +11,8 @@
 
 import { Field } from '@noble/curves/abstract/modular';
 import { weierstrass } from '@noble/curves/abstract/weierstrass';
-import { poseidon4 } from 'poseidon-lite';
 import { sha256 } from '@noble/hashes/sha2.js';
+import { poseidon2, poseidon3 } from 'poseidon-lite';
 
 /** Coordinate field modulus (== bn254 scalar field r). */
 export const FQ_MODULUS =
@@ -71,6 +71,17 @@ export function randomScalar(): bigint {
   }
 }
 
+/** Uniformly random salt ∈ [0, Fq) for burn-address derivation. Not secret. */
+export function randomSalt(): bigint {
+  const buf = new Uint8Array(32);
+  for (;;) {
+    crypto.getRandomValues(buf);
+    const x = bytesToBigIntBE(buf);
+    if (x < FQ_MODULUS) return x;
+  }
+}
+
+
 /** P = x·G (affine). Throws if x ∉ [1, n). */
 export function pubkey(secret: bigint): AffinePoint {
   if (secret <= 0n || secret >= FR_MODULUS) throw new Error('secret out of range');
@@ -80,14 +91,14 @@ export function pubkey(secret: bigint): AffinePoint {
 /**
  * Schnorr signature over grumpkin, matching the circuit:
  *   R = k·G
- *   e = poseidon4(R.x, P.x, recipient, expiry)   // poseidon-lite is over bn254 r == grumpkin Fq
+ *   e = poseidon3(R.x, P.x, recipient)   // poseidon-lite is over bn254 r == grumpkin Fq
  *   z = k + e·x (mod Fr)
  */
-export function schnorrSign(secret: bigint, recipient: bigint, expiry: bigint): SchnorrSig {
+export function schnorrSign(secret: bigint, recipient: bigint): SchnorrSig {
   const P = pubkey(secret);
   const k = randomScalar();
   const R = toAffine(Point.BASE.multiply(k));
-  const e = poseidon4([R.x, P.x, recipient, expiry]);
+  const e = poseidon3([R.x, P.x, recipient]);
   const sigZ = Fr.add(k, Fr.mul(e % FR_MODULUS, secret));
   return { sigR: R, sigZ };
 }
@@ -96,10 +107,26 @@ export function schnorrVerify(
   pub: AffinePoint,
   sig: SchnorrSig,
   recipient: bigint,
-  expiry: bigint,
 ): boolean {
   const P = Point.fromAffine(pub);
   const R = Point.fromAffine(sig.sigR);
-  const e = poseidon4([sig.sigR.x, pub.x, recipient, expiry]);
+  const e = poseidon3([sig.sigR.x, pub.x, recipient]);
   return Point.BASE.multiply(sig.sigZ % FR_MODULUS).equals(R.add(P.multiply(e)));
+}
+
+
+/**
+ * Card-order auth, matching order_card_inner in src/server.rs:
+ *   msg = poseidon2(amount, deadline)
+ *   e   = poseidon3(R.x, P.x, msg)
+ *   z = k + e·x (mod Fr)
+ */
+export function schnorrSignOrder(secret: bigint, amount: bigint, deadline: bigint): SchnorrSig {
+  const P = pubkey(secret);
+  const k = randomScalar();
+  const R = toAffine(Point.BASE.multiply(k));
+  const msg = poseidon2([amount, deadline]);
+  const e = poseidon3([R.x, P.x, msg]);
+  const sigZ = Fr.add(k, Fr.mul(e % FR_MODULUS, secret));
+  return { sigR: R, sigZ };
 }
