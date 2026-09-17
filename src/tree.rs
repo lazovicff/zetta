@@ -12,7 +12,8 @@ pub const TREE_CAPACITY: usize = 1 << TREE_DEPTH; // 262144
 pub struct MerkleTree {
     depth: usize,
     leaves: Vec<Fr>,
-    zero_hashes: Vec<Fr>, // zero_hashes[h] = empty subtree of height h
+    zero_hashes: Vec<Fr>,     // zero_hashes[h] = empty subtree of height h
+    filled_subtrees: Vec<Fr>, // filled_subtrees[h] = rightmost complete subtree of height h
     root: Fr,
 }
 
@@ -30,6 +31,7 @@ impl MerkleTree {
             depth,
             leaves: Vec::new(),
             zero_hashes,
+            filled_subtrees: vec![Fr::zero(); depth],
             root,
         }
     }
@@ -42,10 +44,27 @@ impl MerkleTree {
         self.leaves.len()
     }
 
-    /// Append a leaf; returns the new root.
+    /// Append a leaf; returns the new root. O(depth) — updates only the path
+    /// from the inserted leaf to the root.
     pub fn insert(&mut self, leaf: Fr) -> Fr {
+        let index = self.leaves.len();
         self.leaves.push(leaf);
-        self.root = self.compute_root();
+
+        let mut current = leaf;
+        let mut idx = index;
+        for h in 0..self.depth {
+            if idx & 1 == 0 {
+                // Left child: right sibling is empty; record this node as the
+                // level's filled left subtree for a future right child.
+                self.filled_subtrees[h] = current;
+                current = poseidon2(current, self.zero_hashes[h]).expect("poseidon");
+            } else {
+                // Right child: combine with the stored left sibling.
+                current = poseidon2(self.filled_subtrees[h], current).expect("poseidon");
+            }
+            idx >>= 1;
+        }
+        self.root = current;
         self.root
     }
 
@@ -93,19 +112,6 @@ impl MerkleTree {
             h += 1;
         }
         proof
-    }
-
-    fn compute_root(&self) -> Fr {
-        if self.leaves.is_empty() {
-            return self.zero_hashes[self.depth];
-        }
-        let mut level = self.leaves.clone();
-        let mut h = 0;
-        while h < self.depth {
-            level = next_level(&level, self.zero_hashes[h]);
-            h += 1;
-        }
-        level[0]
     }
 }
 
