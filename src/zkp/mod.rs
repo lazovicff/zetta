@@ -15,6 +15,7 @@ use folding_schemes::folding::nova::{Nova, PreprocessorParam};
 use folding_schemes::frontend::FCircuit;
 use folding_schemes::transcript::poseidon::poseidon_canonical_config;
 use folding_schemes::{Decider, FoldingScheme};
+use tracing::info;
 
 pub use poseidon::*;
 pub use update_root::*;
@@ -149,11 +150,7 @@ macro_rules! prove_for {
 
             let load_start = Instant::now();
             let (nova_pp, nova_vp, decider_pp, _) = $loader()?;
-            eprintln!(
-                "[{}] load_params={:?}",
-                stringify!($name),
-                load_start.elapsed()
-            );
+            info!(proof = stringify!($name), phase = "load_params", elapsed = ?load_start.elapsed());
             let nova_params = (nova_pp, nova_vp);
 
             let rng = ark_std::rand::rngs::OsRng;
@@ -275,6 +272,8 @@ pub fn load_single_withdraw_params()
 pub fn prove_single_withdraw(
     circuit: SingleWithdrawCircuit,
 ) -> Result<(ark_groth16::Proof<Bn254>, Vec<Fr>), Box<dyn std::error::Error>> {
+    use std::time::Instant;
+    let start = Instant::now();
     let (pk, _vk) = load_single_withdraw_params()?;
     let mut rng = ark_std::rand::rngs::OsRng;
     let public_inputs = vec![
@@ -284,6 +283,7 @@ pub fn prove_single_withdraw(
         circuit.witness.value,
     ];
     let proof = Groth16::<Bn254>::prove(&pk, circuit, &mut rng)?;
+    info!(proof = "prove_single_withdraw", elapsed = ?start.elapsed(), "single-withdraw Groth16 proof done");
     Ok((proof, public_inputs))
 }
 

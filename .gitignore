@@ -8,3 +8,5 @@
 node_modules
 .next
 mobile/.expo
+# Ignore anvil deployments
+broadcast/Deploy.s.sol/31337

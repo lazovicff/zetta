@@ -5,6 +5,7 @@
 use alloy::primitives::U256;
 use ark_bn254::{Fq, Fr};
 use ark_ff::{BigInteger, PrimeField};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Row};
 
 use crate::ids::user_id;
@@ -52,8 +53,6 @@ pub struct Registration {
 #[derive(Clone)]
 pub struct Db(PgPool);
 
-const REG_COLS: &str = "burn_address, created_at, pubkey_x, pubkey_y, sig_r_x, sig_r_y, sig_z, salt, recipient, user_id";
-
 fn row_to_registration(row: &sqlx::postgres::PgRow) -> Result<Registration, sqlx::Error> {
     let addr: Vec<u8> = row.try_get("burn_address")?;
     let address: [u8; 20] = addr
@@ -75,7 +74,10 @@ fn row_to_registration(row: &sqlx::postgres::PgRow) -> Result<Registration, sqlx
 
 impl Db {
     pub async fn open(url: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let pool = PgPool::connect(url).await?;
+        let options: PgConnectOptions = url.parse()?;
+        let pool = PgPoolOptions::new()
+            .connect_with(options.statement_cache_capacity(0))
+            .await?;
         Ok(Self(pool))
     }
 
@@ -83,9 +85,10 @@ impl Db {
         &self,
         r: &Registration,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        sqlx::query(&format!(
-            "INSERT INTO registrations ({REG_COLS}) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"
-        ))
+        sqlx::query(
+            "INSERT INTO registrations (burn_address, created_at, pubkey_x, pubkey_y, sig_r_x, sig_r_y, sig_z, salt, recipient, user_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        )
         .bind(r.address.as_slice())
         .bind(r.created_at)
         .bind(fr_to_blob(r.pubkey_x))
@@ -105,12 +108,13 @@ impl Db {
     pub async fn latest_registrations(
         &self,
     ) -> Result<Vec<Registration>, Box<dyn std::error::Error>> {
-        let rows = sqlx::query(&format!(
-            "SELECT {REG_COLS} FROM registrations r
+        let rows = sqlx::query(
+            "SELECT burn_address, created_at, pubkey_x, pubkey_y, sig_r_x, sig_r_y, sig_z, salt, recipient, user_id
+             FROM registrations r
              WHERE created_at = (
                  SELECT MAX(created_at) FROM registrations WHERE burn_address = r.burn_address
-             )"
-        ))
+             )",
+        )
         .fetch_all(&self.0)
         .await?;
         let regs = rows
@@ -124,10 +128,11 @@ impl Db {
         &self,
         pubkey_x: Fr,
     ) -> Result<Option<Registration>, Box<dyn std::error::Error>> {
-        let row = sqlx::query(&format!(
-            "SELECT {REG_COLS} FROM registrations
-             WHERE pubkey_x = $1 ORDER BY created_at DESC LIMIT 1"
-        ))
+        let row = sqlx::query(
+            "SELECT burn_address, created_at, pubkey_x, pubkey_y, sig_r_x, sig_r_y, sig_z, salt, recipient, user_id
+             FROM registrations
+             WHERE pubkey_x = $1 ORDER BY created_at DESC LIMIT 1",
+        )
         .bind(fr_to_blob(pubkey_x))
         .fetch_optional(&self.0)
         .await?;
@@ -141,10 +146,11 @@ impl Db {
         &self,
         user_id: &str,
     ) -> Result<Option<Registration>, Box<dyn std::error::Error>> {
-        let row = sqlx::query(&format!(
-            "SELECT {REG_COLS} FROM registrations
-             WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1"
-        ))
+        let row = sqlx::query(
+            "SELECT burn_address, created_at, pubkey_x, pubkey_y, sig_r_x, sig_r_y, sig_z, salt, recipient, user_id
+             FROM registrations
+             WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1",
+        )
         .bind(user_id)
         .fetch_optional(&self.0)
         .await?;

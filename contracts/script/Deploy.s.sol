@@ -5,7 +5,7 @@ import {Script, console} from "forge-std/Script.sol";
 import {zERC20} from "../src/zERC20.sol";
 import {DAIVault} from "../src/DAIVault.sol";
 import {RewardDistributor} from "../src/RewardDistributor.sol";
-import {Verifier, IRootTransitionVerifier, IWithdrawVerifier} from "../src/Verifier.sol";
+import {Verifier, IRootTransitionVerifier, IWithdrawVerifier, ISingleWithdrawVerifier} from "../src/Verifier.sol";
 import {NovaDecider as RootVerifier} from "../src/verifiers/RootTransitionVerifier.sol";
 import {NovaDecider as WithdrawVerifier} from "../src/verifiers/WithdrawVerifier.sol";
 import {Groth16Verifier as SingleWithdrawVerifier} from "../src/verifiers/SingleWithdrawVerifier.sol";

@@ -1,7 +1,3 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
 use alloy::primitives::{Address, B256, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::Filter;
@@ -18,6 +14,10 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use folding_schemes::frontend::FCircuit;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tracing::{debug, info, warn};
 
 use crate::burn::{address_to_fr, recipient, trim_to_160};
 use crate::config::Config;
@@ -136,7 +136,7 @@ fn apply_transfer(
 fn log_recipient(state: &SharedState) {
     let s = state.lock().unwrap();
     let r = recipient(s.chain_id, s.exchange_addr, s.tweak);
-    println!("recipient = {}", r);
+    info!(stage = "boot", recipient = %r, "exchange recipient");
 }
 
 fn spawn_http_server(app: AppState, port: u16) {
@@ -158,7 +158,9 @@ fn spawn_http_server(app: AppState, port: u16) {
 }
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    info!(stage = "boot", "loading config");
     let config = Config::from_env()?;
+    info!(stage = "boot", chain_id = config.chain_id, rpc = %config.rpc_url, port = config.port, "config loaded");
 
     let signer: PrivateKeySigner = config.private_key.parse()?;
     let exchange_addr = signer.address().into_array();
@@ -172,8 +174,8 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     )?));
 
     let db = Db::open(&config.database_url).await?;
+    info!(stage = "boot", "database connected");
 
-    // Hydrate in-memory auth maps from the durable log.
     {
         let regs = db.latest_registrations().await?;
         let mut s = state.lock().unwrap();
@@ -181,17 +183,21 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let pk = G2Affine::new_unchecked(r.pubkey_x, r.pubkey_y);
             let rr = G2Affine::new_unchecked(r.sig_r_x, r.sig_r_y);
             if !(pk.is_on_curve() && rr.is_on_curve()) {
-                eprintln!("skipping invalid registration 0x{}", hex::encode(r.address));
+                warn!(stage = "boot", addr = %hex::encode(r.address), "skipping invalid registration");
                 continue;
             }
             s.pubkey_by_addr.insert(r.address, G2::from(pk));
             s.sig_by_addr.insert(r.address, (G2::from(rr), r.sig_z));
             s.salt_by_addr.insert(r.address, r.salt);
         }
-        println!("hydrated {} registrations", regs.len());
+        info!(stage = "boot", count = regs.len(), "hydrated registrations");
     }
 
     log_recipient(&state);
+    info!(
+        stage = "boot",
+        "spawning HTTP server on port {}", config.port
+    );
     spawn_http_server(
         AppState {
             state: state.clone(),
@@ -201,11 +207,13 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let mut last_block = catch_up(&state, &provider, &config).await?;
+    info!(stage = "catchup", last_block, "catch-up complete");
 
     loop {
         last_block = indexer_step(&state, &provider, &config, last_block).await?;
         do_update_root(&state, &provider, &config).await?;
         do_withdraw(&state, &provider, &config).await?;
+        debug!(stage = "idle", "sleeping {}s", config.poll_interval_secs);
         tokio::time::sleep(Duration::from_secs(config.poll_interval_secs)).await;
     }
 }
@@ -218,16 +226,30 @@ async fn indexer_step(
 ) -> Result<u64, Box<dyn std::error::Error>> {
     let latest = provider.get_block_number().await?;
     if latest <= last_block {
+        debug!(stage = "indexer", last_block, latest, "no new blocks");
         return Ok(last_block);
     }
+    info!(
+        stage = "indexer",
+        from = last_block + 1,
+        to = latest,
+        "fetching transfers"
+    );
     let transfers = fetch_transfers(provider, config.token, last_block + 1, latest).await?;
+    info!(
+        stage = "indexer",
+        count = transfers.len(),
+        "fetched transfers"
+    );
 
     let mut witnesses = Vec::new();
+    let mut added = 0usize;
     {
         let mut s = state.lock().unwrap();
         for (to, value) in transfers {
             if let Some(w) = apply_transfer(&mut s, to, value, true)? {
                 witnesses.push(w);
+                added += 1;
             }
         }
         if !witnesses.is_empty() {
@@ -239,6 +261,13 @@ async fn indexer_step(
                 }
             }
         }
+    }
+    if added > 0 {
+        info!(
+            stage = "indexer",
+            witnesses = added,
+            "accumulated root-transition witnesses"
+        );
     }
 
     Ok(latest)
@@ -270,21 +299,28 @@ async fn do_update_root(
     let (z_0, witnesses) = {
         let mut s = state.lock().unwrap();
         if s.tree.len() < TREE_CAPACITY {
-            return Ok(()); // not full yet
+            return Ok(());
         }
         s.pending.take().expect("pending witnesses")
     };
 
+    info!(
+        stage = "update_root",
+        steps = witnesses.len(),
+        "tree full — proving root transition (Nova IVC + Groth16 decider)"
+    );
     let circuit = RootTransitionCircuit::new(())?;
+    let prove_start = std::time::Instant::now();
     let calldata = prove_root_transition(circuit, z_0, witnesses)?;
+    info!(stage = "update_root", elapsed = ?prove_start.elapsed(), "root-transition proof done");
     let proof_arr = decode_opaque_proof::<32>(&calldata);
 
     let contract = IVerifier::new(config.verifier, provider);
+    info!(stage = "update_root", verifier = %config.verifier, "calling updateRoot(proof)");
     let tx = contract.updateRoot(proof_arr).send().await?;
     let receipt = tx.get_receipt().await?;
-    println!("updateRoot tx = {}", receipt.transaction_hash);
+    info!(stage = "update_root", tx = %receipt.transaction_hash, gas = receipt.gas_used, "updateRoot confirmed");
 
-    // Move the full tree into finalized_trees and start a fresh one.
     {
         let mut s = state.lock().unwrap();
         let finalized = std::mem::replace(&mut s.tree, MerkleTree::new(TREE_DEPTH));
@@ -305,14 +341,14 @@ async fn do_withdraw(
     };
     let recipient = recipient(chain_id, exchange_addr, tweak);
 
-    // Group deposits by rootIndex: (tree_index, P, R, z, salt, value).
+    info!(stage = "withdraw", "grouping deposits by tree");
     let mut by_tree: HashMap<usize, Vec<(usize, G2, G2, Fq, Fr, Fr)>> = HashMap::new();
     {
         let s = state.lock().unwrap();
         for (addr, ds) in &s.deposits {
             for (value, root_index, tree_index) in ds {
                 if *root_index >= s.finalized_trees.len() {
-                    continue; // tree not finalized yet
+                    continue;
                 }
                 let (Some(pubkey), Some((sig_r, sig_z)), Some(salt)) = (
                     s.pubkey_by_addr.get(addr),
@@ -332,11 +368,26 @@ async fn do_withdraw(
             }
         }
     }
+    if by_tree.is_empty() {
+        debug!(stage = "withdraw", "no finalized deposits to withdraw");
+        return Ok(());
+    }
+    info!(
+        stage = "withdraw",
+        trees = by_tree.len(),
+        "deposits grouped"
+    );
 
     for (root_index, mut receipts) in by_tree {
         if receipts.len() == 1 {
             let (idx, pubkey, sig_r, sig_z, salt, value) = receipts[0];
 
+            info!(
+                stage = "withdraw",
+                tree = root_index,
+                kind = "single",
+                "proving single withdraw (Groth16)"
+            );
             let (transfer_root, witness) = {
                 let s = state.lock().unwrap();
                 let tree = &s.finalized_trees[root_index];
@@ -381,6 +432,7 @@ async fn do_withdraw(
             ];
 
             let contract = IVerifier::new(config.verifier, provider);
+            info!(stage = "withdraw", tree = root_index, verifier = %config.verifier, "calling withdrawSingle(...)");
             let tx = contract
                 .withdrawSingle(
                     U256::from(chain_id),
@@ -395,13 +447,17 @@ async fn do_withdraw(
                 .send()
                 .await?;
             let receipt = tx.get_receipt().await?;
-            println!(
-                "withdrawSingle tx (tree {root_index}) = {}",
-                receipt.transaction_hash
-            );
+            info!(stage = "withdraw", tree = root_index, tx = %receipt.transaction_hash, gas = receipt.gas_used, "withdrawSingle confirmed");
         } else {
             receipts.sort_by_key(|r| r.0);
 
+            info!(
+                stage = "withdraw",
+                tree = root_index,
+                kind = "batch",
+                receipts = receipts.len(),
+                "proving batch withdraw (Nova IVC + Groth16 decider)"
+            );
             let (transfer_root, witnesses) = {
                 let s = state.lock().unwrap();
                 let tree = &s.finalized_trees[root_index];
@@ -435,6 +491,7 @@ async fn do_withdraw(
             let proof_arr = decode_opaque_proof::<34>(&calldata);
 
             let contract = IVerifier::new(config.verifier, provider);
+            info!(stage = "withdraw", tree = root_index, verifier = %config.verifier, "calling withdraw(...)");
             let tx = contract
                 .withdraw(
                     U256::from(chain_id),
@@ -446,10 +503,7 @@ async fn do_withdraw(
                 .send()
                 .await?;
             let receipt = tx.get_receipt().await?;
-            println!(
-                "withdraw tx (tree {root_index}) = {}",
-                receipt.transaction_hash
-            );
+            info!(stage = "withdraw", tree = root_index, tx = %receipt.transaction_hash, gas = receipt.gas_used, "withdraw confirmed");
 
             {
                 let mut s = state.lock().unwrap();

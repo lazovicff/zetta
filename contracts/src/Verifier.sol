@@ -145,4 +145,8 @@ contract Verifier {
         bytes32 h = keccak256(abi.encodePacked(uint64(chainId), addr, tweak));
         return uint256(h) & HASH_CHAIN_MASK;
     }
+
+    function transferRootsLength() external view returns (uint256) {
+        return transferRoots.length;
+    }
 }
