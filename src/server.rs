@@ -25,8 +25,8 @@ use crate::db::{Db, Registration, fr_to_u256, unix_now};
 use crate::state::State;
 use crate::tree::{MerkleTree, TREE_CAPACITY, TREE_DEPTH};
 use crate::zkp::{
-    RootTransitionCircuit, RootTransitionWitness, WithdrawCircuit, WithdrawWitness,
-    prove_root_transition, prove_withdraw,
+    RootTransitionCircuit, RootTransitionWitness, SingleWithdrawCircuit, WithdrawCircuit,
+    WithdrawWitness, prove_root_transition, prove_single_withdraw, prove_withdraw,
 };
 use crate::zkp::{poseidon2, poseidon3};
 
@@ -39,11 +39,11 @@ sol! {
     interface IVerifier {
         function updateRoot(uint256[32] proof) external;
         function withdraw(uint256 chainId, address addr, bytes32 tweak, uint256 rootIndex, uint256[34] proof) external;
+        function withdrawSingle(uint256 chainId, address addr, bytes32 tweak, uint256 rootIndex, uint256[2] pA, uint256[2][2] pB, uint256[2] pC, uint256[4] pubSignals) external;
         function transferIndex() external view returns (uint256);
         function transferRootsLength() external view returns (uint256);
         function transferRoots(uint256 index) external view returns (uint256);
     }
-
 }
 
 type SharedState = Arc<Mutex<State>>;
@@ -57,6 +57,10 @@ struct AppState {
 fn u256_to_fr(v: U256) -> Fr {
     let bytes: [u8; 32] = v.to_be_bytes();
     Fr::from_be_bytes_mod_order(&bytes)
+}
+
+fn fq_to_u256(x: Fq) -> U256 {
+    U256::from_be_slice(&crate::db::fr_to_blob(x))
 }
 
 fn decode_opaque_proof<const N: usize>(calldata: &[u8]) -> [U256; N] {
@@ -330,66 +334,130 @@ async fn do_withdraw(
     }
 
     for (root_index, mut receipts) in by_tree {
-        if receipts.len() < 2 {
-            continue; // decider requires >= 2 folded steps
-        }
-        receipts.sort_by_key(|r| r.0);
+        if receipts.len() == 1 {
+            let (idx, pubkey, sig_r, sig_z, salt, value) = receipts[0];
 
-        let (transfer_root, witnesses) = {
-            let s = state.lock().unwrap();
-            let tree = &s.finalized_trees[root_index];
-            let transfer_root = tree.root();
-            let mut witnesses = Vec::with_capacity(receipts.len());
-            for (idx, pubkey, sig_r, sig_z, salt, value) in receipts {
+            let (transfer_root, witness) = {
+                let s = state.lock().unwrap();
+                let tree = &s.finalized_trees[root_index];
                 let proof = tree.proof(idx);
                 let mut merkle_path = [Fr::zero(); TREE_DEPTH];
                 merkle_path.copy_from_slice(&proof);
-                witnesses.push(WithdrawWitness {
-                    pubkey,
-                    sig_r,
-                    sig_z,
-                    salt,
-                    value,
-                    index: Fr::from(root_index as u64 * TREE_CAPACITY as u64 + idx as u64),
-                    merkle_path,
-                });
+                (
+                    tree.root(),
+                    WithdrawWitness {
+                        pubkey,
+                        sig_r,
+                        sig_z,
+                        salt,
+                        value,
+                        index: Fr::from(root_index as u64 * TREE_CAPACITY as u64 + idx as u64),
+                        merkle_path,
+                    },
+                )
+            };
+
+            let index_with_offset = Fr::from(root_index as u64 * TREE_CAPACITY as u64);
+            let circuit = SingleWithdrawCircuit {
+                transfer_root,
+                recipient,
+                index_with_offset,
+                witness,
+            };
+            let (proof, _public_inputs) = prove_single_withdraw(circuit)?;
+
+            let p_a: [U256; 2] = [fq_to_u256(proof.a.x), fq_to_u256(proof.a.y)];
+            let p_b: [[U256; 2]; 2] = [
+                [fq_to_u256(proof.b.x.c1), fq_to_u256(proof.b.x.c0)],
+                [fq_to_u256(proof.b.y.c1), fq_to_u256(proof.b.y.c0)],
+            ];
+
+            let p_c: [U256; 2] = [fq_to_u256(proof.c.x), fq_to_u256(proof.c.y)];
+            let pub_signals: [U256; 4] = [
+                fr_to_u256(transfer_root),
+                fr_to_u256(recipient),
+                fr_to_u256(index_with_offset),
+                fr_to_u256(value),
+            ];
+
+            let contract = IVerifier::new(config.verifier, provider);
+            let tx = contract
+                .withdrawSingle(
+                    U256::from(chain_id),
+                    Address::from(exchange_addr),
+                    B256::from(tweak),
+                    U256::from(root_index as u64),
+                    p_a,
+                    p_b,
+                    p_c,
+                    pub_signals,
+                )
+                .send()
+                .await?;
+            let receipt = tx.get_receipt().await?;
+            println!(
+                "withdrawSingle tx (tree {root_index}) = {}",
+                receipt.transaction_hash
+            );
+        } else {
+            receipts.sort_by_key(|r| r.0);
+
+            let (transfer_root, witnesses) = {
+                let s = state.lock().unwrap();
+                let tree = &s.finalized_trees[root_index];
+                let transfer_root = tree.root();
+                let mut witnesses = Vec::with_capacity(receipts.len());
+                for (idx, pubkey, sig_r, sig_z, salt, value) in receipts {
+                    let proof = tree.proof(idx);
+                    let mut merkle_path = [Fr::zero(); TREE_DEPTH];
+                    merkle_path.copy_from_slice(&proof);
+                    witnesses.push(WithdrawWitness {
+                        pubkey,
+                        sig_r,
+                        sig_z,
+                        salt,
+                        value,
+                        index: Fr::from(root_index as u64 * TREE_CAPACITY as u64 + idx as u64),
+                        merkle_path,
+                    });
+                }
+                (transfer_root, witnesses)
+            };
+
+            let z_0 = vec![
+                Fr::from(root_index as u64 * TREE_CAPACITY as u64),
+                Fr::zero(),
+                transfer_root,
+                recipient,
+            ];
+            let circuit = WithdrawCircuit::new(())?;
+            let calldata = prove_withdraw(circuit, z_0, witnesses)?;
+            let proof_arr = decode_opaque_proof::<34>(&calldata);
+
+            let contract = IVerifier::new(config.verifier, provider);
+            let tx = contract
+                .withdraw(
+                    U256::from(chain_id),
+                    Address::from(exchange_addr),
+                    B256::from(tweak),
+                    U256::from(root_index as u64),
+                    proof_arr,
+                )
+                .send()
+                .await?;
+            let receipt = tx.get_receipt().await?;
+            println!(
+                "withdraw tx (tree {root_index}) = {}",
+                receipt.transaction_hash
+            );
+
+            {
+                let mut s = state.lock().unwrap();
+                for ds in s.deposits.values_mut() {
+                    ds.retain(|(_, ri, _)| *ri != root_index);
+                }
+                s.deposits.retain(|_, ds| !ds.is_empty());
             }
-            (transfer_root, witnesses)
-        };
-
-        let z_0 = vec![
-            Fr::from(root_index as u64 * TREE_CAPACITY as u64),
-            Fr::zero(),
-            transfer_root,
-            recipient,
-        ];
-        let circuit = WithdrawCircuit::new(())?;
-        let calldata = prove_withdraw(circuit, z_0, witnesses)?;
-        let proof_arr = decode_opaque_proof::<34>(&calldata);
-
-        let contract = IVerifier::new(config.verifier, provider);
-        let tx = contract
-            .withdraw(
-                U256::from(chain_id),
-                Address::from(exchange_addr),
-                B256::from(tweak),
-                U256::from(root_index as u64),
-                proof_arr,
-            )
-            .send()
-            .await?;
-        let receipt = tx.get_receipt().await?;
-        println!(
-            "withdraw tx (tree {root_index}) = {}",
-            receipt.transaction_hash
-        );
-
-        {
-            let mut s = state.lock().unwrap();
-            for ds in s.deposits.values_mut() {
-                ds.retain(|(_, ri, _)| *ri != root_index);
-            }
-            s.deposits.retain(|_, ds| !ds.is_empty());
         }
     }
 

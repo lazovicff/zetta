@@ -99,7 +99,7 @@ fn challenge(pk: &GVar, r: &GVar, recipient: FpVar<Fr>) -> Result<FpVar<Fr>, Syn
 }
 
 /// require z·G − e·P == R
-fn schnorr_verify(
+pub fn schnorr_verify(
     pk: &GVar,
     r: &GVar,
     z_bits: &[Boolean<Fr>],

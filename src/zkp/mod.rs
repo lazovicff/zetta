@@ -1,10 +1,13 @@
 mod poseidon;
 mod update_root;
 mod withdraw;
+mod withdraw_single;
 
 use ark_bn254::{Bn254, Fr, G1Projective as G1};
-use ark_groth16::Groth16;
+use ark_groth16::{Groth16, ProvingKey, VerifyingKey};
 use ark_grumpkin::Projective as G2;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_snark::SNARK;
 use folding_schemes::commitment::kzg::KZG;
 use folding_schemes::commitment::pedersen::Pedersen;
 use folding_schemes::folding::nova::decider_eth::Decider as DeciderEth;
@@ -16,12 +19,13 @@ use folding_schemes::{Decider, FoldingScheme};
 pub use poseidon::*;
 pub use update_root::*;
 pub use withdraw::*;
+pub use withdraw_single::*;
 
-use solidity_verifiers::NovaCycleFoldVerifierKey;
 use solidity_verifiers::calldata::{
     NovaVerificationMode, prepare_calldata_for_nova_cyclefold_verifier,
 };
 use solidity_verifiers::verifiers::nova_cyclefold::get_decider_template_for_cyclefold_decider;
+use solidity_verifiers::{Groth16VerifierKey, NovaCycleFoldVerifierKey, ProtocolVerifierKey};
 
 type RootN = Nova<G1, G2, RootTransitionCircuit, KZG<'static, Bn254>, Pedersen<G2>, false>;
 type RootD = DeciderEth<
@@ -234,6 +238,61 @@ macro_rules! gen_verifier_for {
 
 gen_verifier_for!(gen_root_transition_verifier, load_root_params, RootD, 3);
 gen_verifier_for!(gen_withdraw_verifier, load_withdraw_params, WithdrawD, 4);
+
+/// Cached Groth16 proving/verifying keys for the single-withdraw circuit.
+pub fn load_single_withdraw_params()
+-> Result<(ProvingKey<Bn254>, VerifyingKey<Bn254>), Box<dyn std::error::Error>> {
+    let dir = std::path::Path::new("artifacts");
+    std::fs::create_dir_all(dir)?;
+    let pk_path = dir.join("single_withdraw_g16_pk.bin");
+    let vk_path = dir.join("single_withdraw_g16_vk.bin");
+
+    if pk_path.exists() && vk_path.exists() {
+        let pk = ProvingKey::<Bn254>::deserialize_uncompressed(
+            &mut std::fs::read(&pk_path)?.as_slice(),
+        )?;
+        let vk = VerifyingKey::<Bn254>::deserialize_uncompressed(
+            &mut std::fs::read(&vk_path)?.as_slice(),
+        )?;
+        Ok((pk, vk))
+    } else {
+        let mut rng = ark_std::rand::rngs::OsRng;
+        let pk = Groth16::<Bn254>::generate_random_parameters_with_reduction(
+            SingleWithdrawCircuit::default(),
+            &mut rng,
+        )?;
+        let mut buf = vec![];
+        pk.serialize_uncompressed(&mut buf)?;
+        std::fs::write(&pk_path, buf)?;
+        let mut buf = vec![];
+        pk.vk.serialize_uncompressed(&mut buf)?;
+        std::fs::write(&vk_path, buf)?;
+        Ok((pk.clone(), pk.vk.clone()))
+    }
+}
+
+/// Prove a single withdrawal. Returns (proof, public_inputs).
+pub fn prove_single_withdraw(
+    circuit: SingleWithdrawCircuit,
+) -> Result<(ark_groth16::Proof<Bn254>, Vec<Fr>), Box<dyn std::error::Error>> {
+    let (pk, _vk) = load_single_withdraw_params()?;
+    let mut rng = ark_std::rand::rngs::OsRng;
+    let public_inputs = vec![
+        circuit.transfer_root,
+        circuit.recipient,
+        circuit.index_with_offset,
+        circuit.witness.value,
+    ];
+    let proof = Groth16::<Bn254>::prove(&pk, circuit, &mut rng)?;
+    Ok((proof, public_inputs))
+}
+
+/// Standalone Groth16 Solidity verifier (not the Nova opaque decider).
+pub fn gen_single_withdraw_verifier() -> Result<String, Box<dyn std::error::Error>> {
+    let (_pk, vk) = load_single_withdraw_params()?;
+    let g16_vk = Groth16VerifierKey::from(vk);
+    Ok(String::from_utf8(g16_vk.render_as_template(None))?)
+}
 
 #[cfg(test)]
 mod tests {

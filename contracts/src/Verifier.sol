@@ -11,6 +11,15 @@ interface IWithdrawVerifier {
     function verifyOpaqueNovaProof(uint256[34] calldata proof) external view returns (bool);
 }
 
+interface ISingleWithdrawVerifier {
+    function verifyProof(
+        uint256[2] calldata pA,
+        uint256[2][2] calldata pB,
+        uint256[2] calldata pC,
+        uint256[4] calldata pubSignals
+    ) external view returns (bool);
+}
+
 contract Verifier {
     zERC20 public token;
 
@@ -21,6 +30,7 @@ contract Verifier {
 
     IRootTransitionVerifier public rootTransitionVerifier;
     IWithdrawVerifier public withdrawVerifier;
+    ISingleWithdrawVerifier public singleWithdrawVerifier;
 
     uint256 public immutable INITIAL_ROOT;
     address public owner;
@@ -39,10 +49,16 @@ contract Verifier {
         _;
     }
 
-    function setVerifiers(IRootTransitionVerifier root_, IWithdrawVerifier withdraw_) external onlyOwner {
+    function setVerifiers(
+        IRootTransitionVerifier root_,
+        IWithdrawVerifier withdraw_,
+        ISingleWithdrawVerifier single_
+    ) external onlyOwner {
         rootTransitionVerifier = root_;
         withdrawVerifier = withdraw_;
+        singleWithdrawVerifier = single_;
     }
+
 
     /// proof = [i, z0[0..3], zi[0..3], 25 decider elements]
     /// z0 = [0, prevHashChain, emptyRoot], zi = [capacity, newHashChain, treeRoot]
@@ -80,6 +96,39 @@ contract Verifier {
         require(proofRecipient == recipient, "recipient mismatch");
 
         require(withdrawVerifier.verifyOpaqueNovaProof(proof), "invalid proof");
+
+        uint256 delta = sum - totalWithdrawn[rootIndex][recipient];
+        require(delta > 0, "nothing to withdraw");
+        totalWithdrawn[rootIndex][recipient] = sum;
+
+        token.teleport(addr, delta);
+    }
+
+    /// pubSignals = [transferRoot, recipient, indexWithOffset, value]
+    function withdrawSingle(
+        uint256 chainId,
+        address addr,
+        bytes32 tweak,
+        uint256 rootIndex,
+        uint256[2] calldata pA,
+        uint256[2][2] calldata pB,
+        uint256[2] calldata pC,
+        uint256[4] calldata pubSignals
+    ) external {
+        require(chainId == block.chainid, "wrong chain");
+
+        uint256 recipient = computeRecipient(chainId, addr, tweak);
+
+        uint256 transferRoot = pubSignals[0];
+        uint256 proofRecipient = pubSignals[1];
+        uint256 indexWithOffset = pubSignals[2];
+        uint256 sum = pubSignals[3];
+
+        require(transferRoot == transferRoots[rootIndex], "unknown root");
+        require(proofRecipient == recipient, "recipient mismatch");
+        require(indexWithOffset == rootIndex * TREE_CAPACITY, "bad index offset");
+
+        require(singleWithdrawVerifier.verifyProof(pA, pB, pC, pubSignals), "invalid proof");
 
         uint256 delta = sum - totalWithdrawn[rootIndex][recipient];
         require(delta > 0, "nothing to withdraw");

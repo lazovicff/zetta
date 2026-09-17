@@ -8,6 +8,7 @@ import {RewardDistributor} from "../src/RewardDistributor.sol";
 import {Verifier, IRootTransitionVerifier, IWithdrawVerifier} from "../src/Verifier.sol";
 import {NovaDecider as RootVerifier} from "../src/verifiers/RootTransitionVerifier.sol";
 import {NovaDecider as WithdrawVerifier} from "../src/verifiers/WithdrawVerifier.sol";
+import {Groth16Verifier as SingleWithdrawVerifier} from "../src/verifiers/SingleWithdrawVerifier.sol";
 import {MockDAI} from "../mocks/MockDAI.sol";
 import {MockSDAI} from "../mocks/MockSDAI.sol";
 
@@ -29,10 +30,12 @@ contract Deploy is Script {
 
         RootVerifier rootV = new RootVerifier();
         WithdrawVerifier withdrawV = new WithdrawVerifier();
+        SingleWithdrawVerifier singleV = new SingleWithdrawVerifier();
         Verifier verifier = new Verifier(token, INITIAL_ROOT);
         verifier.setVerifiers(
             IRootTransitionVerifier(address(rootV)),
-            IWithdrawVerifier(address(withdrawV))
+            IWithdrawVerifier(address(withdrawV)),
+            ISingleWithdrawVerifier(address(singleV))
         );
 
         dai.mint(msg.sender, 1000 ether);
