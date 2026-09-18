@@ -39,12 +39,12 @@ struct Args {
     #[arg(long, default_value = "http://localhost:8545")]
     rpc_url: String,
 
-    /// Token address (from .env `TOKEN`).
-    #[arg(long, env = "TOKEN")]
-    token: String,
+    /// Chain id, used to locate the deploy broadcast file (from .env `CHAIN_ID`).
+    #[arg(long, env = "CHAIN_ID")]
+    chain_id: u64,
 
-    /// Private key holding deposit funds (from .env `PRIVATE_KEY`).
-    #[arg(long, env = "PRIVATE_KEY")]
+    /// Private key holding deposit funds (from .env `CLIENT_PRIVATE_KEY`).
+    #[arg(long, env = "CLIENT_PRIVATE_KEY")]
     private_key: String,
 
     /// Number of signing keys to create.
@@ -134,7 +134,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let provider = ProviderBuilder::new()
         .wallet(signer)
         .connect_http(args.rpc_url.parse()?);
-    let token = IERC20::new(args.token.parse::<Address>()?, &provider);
+    let token = IERC20::new(
+        zetta::config::deployed_address(args.chain_id, "zERC20")?,
+        &provider,
+    );
 
     let client = reqwest::Client::new();
 

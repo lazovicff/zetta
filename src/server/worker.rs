@@ -21,16 +21,25 @@ use crate::server::{
     AppState, IVerifier, SharedState, Transfer, decode_opaque_proof, fq_to_u256, u256_to_fr,
 };
 use crate::tree::TREE_DEPTH;
-use crate::zkp::poseidon2;
 use crate::zkp::{
-    RootTransitionCircuit, RootTransitionWitness, SingleWithdrawCircuit, WithdrawCircuit,
-    WithdrawWitness, prove_root_transition, prove_single_withdraw, prove_withdraw,
+    RootTransitionCircuit, RootTransitionWitness, SingleRootTransitionCircuit,
+    SingleWithdrawCircuit, WithdrawCircuit, WithdrawWitness, prove_root_transition,
+    prove_single_withdraw, prove_withdraw,
 };
+use crate::zkp::{poseidon2, prove_single_root_transition};
 
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     info!(stage = "boot", "loading config");
     let config = Config::from_env()?;
     info!(stage = "boot", chain_id = config.chain_id, rpc = %config.rpc_url, port = config.port, "config loaded");
+
+    info!(stage = "boot", "loading proving params");
+    let t = std::time::Instant::now();
+    crate::zkp::cached_root_params()?;
+    crate::zkp::cached_withdraw_params()?;
+    crate::zkp::cached_single_root_params()?;
+    crate::zkp::cached_single_withdraw_params()?;
+    info!(stage = "boot", elapsed = ?t.elapsed(), "proving params loaded");
 
     let signer: PrivateKeySigner = config.private_key.parse()?;
     let exchange_addr = signer.address().into_array();
@@ -72,6 +81,29 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         do_withdraw(&state, &provider, &config).await?;
         debug!(stage = "idle", "sleeping {}s", config.poll_interval_secs);
         tokio::time::sleep(Duration::from_secs(config.poll_interval_secs)).await;
+    }
+}
+
+async fn send_and_confirm<F, Fut, E>(
+    send: F,
+) -> Result<alloy::rpc::types::TransactionReceipt, Box<dyn std::error::Error>>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<
+            Output = Result<
+                alloy::providers::PendingTransactionBuilder<alloy::network::Ethereum>,
+                E,
+            >,
+        >,
+    E: ToString + std::error::Error + 'static,
+{
+    match send().await {
+        Ok(p) => Ok(p.get_receipt().await?),
+        Err(e) if e.to_string().contains("-32003") => {
+            warn!(stage = "tx", "nonce too low — retrying with fresh nonce");
+            Ok(send().await?.get_receipt().await?)
+        }
+        Err(e) => Err(e.to_string().into()),
     }
 }
 
@@ -196,12 +228,11 @@ async fn commit_leaves(
     config: &Config,
 ) -> Result<Option<(Vec<Fr>, Vec<RootTransitionWitness>)>, Box<dyn std::error::Error>> {
     let contract = IVerifier::new(config.verifier, provider);
-    contract
-        .reserveHashChain()
-        .send()
-        .await?
-        .get_receipt()
-        .await?;
+    send_and_confirm(|| {
+        let contract = contract.clone();
+        async move { contract.reserveHashChain().send().await }
+    })
+    .await?;
     let reserved_index: u64 = contract.reservedIndex().call().await?.try_into()?;
     let reserved_hash_chain = u256_to_fr(contract.reservedHashChain().call().await?);
     info!(stage = "commit", reserved_index, "hash chain reserved");
@@ -245,25 +276,78 @@ async fn do_update_root(
     z_0: Vec<Fr>,
     witnesses: Vec<RootTransitionWitness>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    info!(
-        stage = "update_root",
-        steps = witnesses.len(),
-        "proving root transition (Nova IVC + Groth16 decider)"
-    );
-    let circuit = RootTransitionCircuit::new(())?;
-    let prove_start = std::time::Instant::now();
-    let calldata = prove_root_transition(circuit, z_0, witnesses)?;
-    info!(stage = "update_root", elapsed = ?prove_start.elapsed(), "root-transition proof done");
-    let proof_arr = decode_opaque_proof::<32>(&calldata);
+    if witnesses.len() == 1 {
+        info!(
+            stage = "update_root",
+            kind = "single",
+            "proving one-leaf transition (Groth16)"
+        );
+        let witness = witnesses[0].clone();
+        let z_1 = {
+            let s = state.lock().unwrap();
+            [Fr::from(s.chain.index()), s.chain.state(), s.tree.root()]
+        };
+        let circuit = SingleRootTransitionCircuit {
+            z_0: [z_0[0], z_0[1], z_0[2]],
+            z_1,
+            witness,
+        };
+        let (proof, _) = prove_single_root_transition(circuit)?;
+        let p_a = [fq_to_u256(proof.a.x), fq_to_u256(proof.a.y)];
+        let p_b = [
+            [fq_to_u256(proof.b.x.c1), fq_to_u256(proof.b.x.c0)],
+            [fq_to_u256(proof.b.y.c1), fq_to_u256(proof.b.y.c0)],
+        ];
+        let p_c = [fq_to_u256(proof.c.x), fq_to_u256(proof.c.y)];
+        let pub_signals: [U256; 6] = [
+            fr_to_u256(z_0[0]),
+            fr_to_u256(z_0[1]),
+            fr_to_u256(z_0[2]),
+            fr_to_u256(z_1[0]),
+            fr_to_u256(z_1[1]),
+            fr_to_u256(z_1[2]),
+        ];
 
-    let contract = IVerifier::new(config.verifier, provider);
-    info!(stage = "update_root", verifier = %config.verifier, "calling updateRoot(proof)");
-    let tx = contract.updateRoot(proof_arr).send().await?;
-    let receipt = tx.get_receipt().await?;
-    info!(stage = "update_root", tx = %receipt.transaction_hash, gas = receipt.gas_used, "updateRoot confirmed");
+        let contract = IVerifier::new(config.verifier, provider);
+        let receipt = send_and_confirm(|| {
+            let contract = contract.clone();
+            async move {
+                contract
+                    .updateRootSingle(p_a, p_b, p_c, pub_signals)
+                    .send()
+                    .await
+            }
+        })
+        .await?;
+        info!(stage = "update_root", tx = %receipt.transaction_hash, gas = receipt.gas_used, "updateRootSingle confirmed");
 
-    let mut s = state.lock().unwrap();
-    s.committed_index = s.tree.len() as u64;
+        let mut s = state.lock().unwrap();
+        s.committed_index = s.tree.len() as u64;
+        return Ok(());
+    } else {
+        info!(
+            stage = "update_root",
+            steps = witnesses.len(),
+            "proving root transition (Nova IVC + Groth16 decider)"
+        );
+        let circuit = RootTransitionCircuit::new(())?;
+        let prove_start = std::time::Instant::now();
+        let calldata = prove_root_transition(circuit, z_0, witnesses)?;
+        info!(stage = "update_root", elapsed = ?prove_start.elapsed(), "root-transition proof done");
+        let proof_arr = decode_opaque_proof::<32>(&calldata);
+
+        let contract = IVerifier::new(config.verifier, provider);
+        info!(stage = "update_root", verifier = %config.verifier, "calling updateRoot(proof)");
+        let receipt = send_and_confirm(|| {
+            let contract = contract.clone();
+            async move { contract.updateRoot(proof_arr).send().await }
+        })
+        .await?;
+        info!(stage = "update_root", tx = %receipt.transaction_hash, gas = receipt.gas_used, "updateRoot confirmed");
+
+        let mut s = state.lock().unwrap();
+        s.committed_index = s.tree.len() as u64;
+    }
     Ok(())
 }
 
@@ -349,19 +433,24 @@ async fn do_withdraw(
             fr_to_u256(value),
         ];
 
-        let tx = contract
-            .withdrawSingle(
-                U256::from(chain_id),
-                Address::from(exchange_addr),
-                B256::from(tweak),
-                p_a,
-                p_b,
-                p_c,
-                pub_signals,
-            )
-            .send()
-            .await?;
-        let receipt = tx.get_receipt().await?;
+        let receipt = send_and_confirm(|| {
+            let contract = contract.clone();
+            async move {
+                contract
+                    .withdrawSingle(
+                        U256::from(chain_id),
+                        Address::from(exchange_addr),
+                        B256::from(tweak),
+                        p_a,
+                        p_b,
+                        p_c,
+                        pub_signals,
+                    )
+                    .send()
+                    .await
+            }
+        })
+        .await?;
         info!(stage = "withdraw", tx = %receipt.transaction_hash, gas = receipt.gas_used, "withdrawSingle confirmed");
     } else {
         info!(
@@ -395,16 +484,21 @@ async fn do_withdraw(
         let calldata = prove_withdraw(WithdrawCircuit::new(())?, z_0, witnesses)?;
         let proof_arr = decode_opaque_proof::<34>(&calldata);
 
-        let tx = contract
-            .withdraw(
-                U256::from(chain_id),
-                Address::from(exchange_addr),
-                B256::from(tweak),
-                proof_arr,
-            )
-            .send()
-            .await?;
-        let receipt = tx.get_receipt().await?;
+        let receipt = send_and_confirm(|| {
+            let contract = contract.clone();
+            async move {
+                contract
+                    .withdraw(
+                        U256::from(chain_id),
+                        Address::from(exchange_addr),
+                        B256::from(tweak),
+                        proof_arr,
+                    )
+                    .send()
+                    .await
+            }
+        })
+        .await?;
         info!(stage = "withdraw", tx = %receipt.transaction_hash, gas = receipt.gas_used, "withdraw confirmed");
     }
 

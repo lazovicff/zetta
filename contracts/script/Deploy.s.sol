@@ -5,16 +5,23 @@ import {Script, console} from "forge-std/Script.sol";
 import {zERC20} from "../src/zERC20.sol";
 import {DAIVault} from "../src/DAIVault.sol";
 import {RewardDistributor} from "../src/RewardDistributor.sol";
-import {Verifier, IRootTransitionVerifier, IWithdrawVerifier, ISingleWithdrawVerifier} from "../src/Verifier.sol";
+import {
+    Verifier,
+    IRootTransitionVerifier,
+    IWithdrawVerifier,
+    ISingleWithdrawVerifier,
+    ISingleRootTransitionVerifier
+} from "../src/Verifier.sol";
 import {NovaDecider as RootVerifier} from "../src/verifiers/RootTransitionVerifier.sol";
 import {NovaDecider as WithdrawVerifier} from "../src/verifiers/WithdrawVerifier.sol";
 import {Groth16Verifier as SingleWithdrawVerifier} from "../src/verifiers/SingleWithdrawVerifier.sol";
+import {Groth16Verifier as SingleRootTransitionVerifier} from "../src/verifiers/SingleRootTransitionVerifier.sol";
 import {MockDAI} from "../mocks/MockDAI.sol";
 import {MockSDAI} from "../mocks/MockSDAI.sol";
 
 contract Deploy is Script {
     uint256 constant INITIAL_ROOT =
-        10941962436777715901943463195175331263348098796018438960955633645115732864202;
+        7694308195910501081009121293114024464085863242234210875116972222894508088593;
 
     function run() external {
         vm.startBroadcast();
@@ -30,12 +37,15 @@ contract Deploy is Script {
 
         RootVerifier rootV = new RootVerifier();
         WithdrawVerifier withdrawV = new WithdrawVerifier();
+        SingleRootTransitionVerifier singleRootV = new SingleRootTransitionVerifier();
         SingleWithdrawVerifier singleV = new SingleWithdrawVerifier();
+
         Verifier verifier = new Verifier(token, INITIAL_ROOT);
         verifier.setVerifiers(
             IRootTransitionVerifier(address(rootV)),
             IWithdrawVerifier(address(withdrawV)),
-            ISingleWithdrawVerifier(address(singleV))
+            ISingleWithdrawVerifier(address(singleV)),
+            ISingleRootTransitionVerifier(address(singleRootV))
         );
 
         dai.mint(msg.sender, 1000 ether);

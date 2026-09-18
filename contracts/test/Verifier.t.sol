@@ -3,7 +3,13 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {zERC20} from "../src/zERC20.sol";
-import {Verifier, IRootTransitionVerifier, IWithdrawVerifier, ISingleWithdrawVerifier} from "../src/Verifier.sol";
+import {
+    Verifier,
+    IRootTransitionVerifier,
+    IWithdrawVerifier,
+    ISingleWithdrawVerifier,
+    ISingleRootTransitionVerifier
+} from "../src/Verifier.sol";
 
 contract MockRootVerifier is IRootTransitionVerifier {
     bool public result = true;
@@ -46,12 +52,30 @@ contract MockSingleWithdrawVerifier is ISingleWithdrawVerifier {
     }
 }
 
+contract MockSingleRootTransitionVerifier is ISingleRootTransitionVerifier {
+    bool public result = true;
+
+    function setResult(bool r) external {
+        result = r;
+    }
+
+    function verifyProof(
+        uint256[2] calldata,
+        uint256[2][2] calldata,
+        uint256[2] calldata,
+        uint256[6] calldata
+    ) external view returns (bool) {
+        return result;
+    }
+}
+
 contract VerifierTest is Test {
     zERC20 token;
     Verifier verifier;
     MockRootVerifier rootV;
     MockWithdrawVerifier withdrawV;
     MockSingleWithdrawVerifier singleV;
+    MockSingleRootTransitionVerifier singleRootV;
 
     address alice = address(0xA11CE);
     address bob = address(0xB0B);
@@ -66,7 +90,8 @@ contract VerifierTest is Test {
         rootV = new MockRootVerifier();
         withdrawV = new MockWithdrawVerifier();
         singleV = new MockSingleWithdrawVerifier();
-        verifier.setVerifiers(rootV, withdrawV, singleV);
+        singleRootV = new MockSingleRootTransitionVerifier();
+        verifier.setVerifiers(rootV, withdrawV, singleV, singleRootV);
         token.setVerifier(address(verifier));
     }
 

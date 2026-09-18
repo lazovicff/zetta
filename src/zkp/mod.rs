@@ -1,5 +1,6 @@
 mod poseidon;
 mod update_root;
+mod update_root_single;
 mod withdraw;
 mod withdraw_single;
 
@@ -15,10 +16,12 @@ use folding_schemes::folding::nova::{Nova, PreprocessorParam};
 use folding_schemes::frontend::FCircuit;
 use folding_schemes::transcript::poseidon::poseidon_canonical_config;
 use folding_schemes::{Decider, FoldingScheme};
+use std::path::{Path, PathBuf};
 use tracing::info;
 
 pub use poseidon::*;
 pub use update_root::*;
+pub use update_root_single::*;
 pub use withdraw::*;
 pub use withdraw_single::*;
 
@@ -27,6 +30,8 @@ use solidity_verifiers::calldata::{
 };
 use solidity_verifiers::verifiers::nova_cyclefold::get_decider_template_for_cyclefold_decider;
 use solidity_verifiers::{Groth16VerifierKey, NovaCycleFoldVerifierKey, ProtocolVerifierKey};
+
+pub const ARTIFACTS_DIR: &str = "artifacts";
 
 type RootN = Nova<G1, G2, RootTransitionCircuit, KZG<'static, Bn254>, Pedersen<G2>, false>;
 type RootD = DeciderEth<
@@ -49,98 +54,250 @@ type WithdrawD = DeciderEth<
     WithdrawN,
 >;
 
-macro_rules! cached_params {
-    ($prefix:literal, $name:ident, $fc:ty, $n:ty, $d:ty, $fc_params:expr) => {
-        pub fn $name() -> Result<
-            (
+pub type RootDeciderVp = <RootD as Decider<G1, G2, RootTransitionCircuit, RootN>>::VerifierParam;
+pub type WithdrawDeciderVp =
+    <WithdrawD as Decider<G1, G2, WithdrawCircuit, WithdrawN>>::VerifierParam;
+
+// ---- fs helpers ----
+
+fn to_bytes(v: &impl CanonicalSerialize) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut buf = vec![];
+    v.serialize_uncompressed(&mut buf)?;
+    Ok(buf)
+}
+
+/// Pure read. Missing file is an error pointing at the explicit generator.
+fn read_bytes(path: &PathBuf) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    std::fs::read(path).map_err(|e| {
+        format!(
+            "{}: {e} — run `cargo run --release --bin gen-artifacts` first",
+            path.display()
+        )
+        .into()
+    })
+}
+
+/// Pure write. Fails rather than overwriting existing artifacts, so key
+// material is never silently rotated (the old load-or-generate path did).
+fn write_new(path: &PathBuf, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| {
+            format!(
+                "{}: {e} (refusing to overwrite — `rm -rf artifacts/` to regenerate)",
+                path.display()
+            )
+        })?;
+    f.write_all(bytes)?;
+    Ok(())
+}
+
+// ---- Nova + decider artifact families (root / withdraw) ----
+
+macro_rules! nova_artifact_set {
+    ($prefix:literal, $holder:ident, $fc:ty, $n:ty, $d:ty, $fc_params:expr,
+     create = $create:ident, read = $read:ident, write = $write:ident, cached = $cached:ident) => {
+        pub struct $holder {
+            pub nova_params: (
                 <$n as FoldingScheme<G1, G2, $fc>>::ProverParam,
                 <$n as FoldingScheme<G1, G2, $fc>>::VerifierParam,
-                <$d as Decider<G1, G2, $fc, $n>>::ProverParam,
-                <$d as Decider<G1, G2, $fc, $n>>::VerifierParam,
             ),
-            Box<dyn std::error::Error>,
-        > {
-            use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+            pub decider_pp: <$d as Decider<G1, G2, $fc, $n>>::ProverParam,
+            pub decider_vp: <$d as Decider<G1, G2, $fc, $n>>::VerifierParam,
+        }
 
-            let dir = std::path::Path::new("artifacts");
+        /// CREATE: fresh random params in memory. No fs, no cache.
+        pub fn $create() -> Result<$holder, Box<dyn std::error::Error>> {
+            let f_circuit = <$fc>::new($fc_params.clone())?;
+            let poseidon_config = poseidon_canonical_config::<Fr>();
+            let mut rng = ark_std::rand::rngs::OsRng;
+
+            let prep = PreprocessorParam::new(poseidon_config, f_circuit.clone());
+            let nova_params = <$n as FoldingScheme<G1, G2, $fc>>::preprocess(&mut rng, &prep)?;
+            let (decider_pp, decider_vp) = <$d as Decider<G1, G2, $fc, $n>>::preprocess(
+                &mut rng,
+                (nova_params.clone(), f_circuit.state_len()),
+            )?;
+            Ok($holder {
+                nova_params,
+                decider_pp,
+                decider_vp,
+            })
+        }
+
+        /// SAVE TO FS: writes the four artifact files. Never generates, never overwrites.
+        pub fn $write(dir: &Path, p: &$holder) -> Result<(), Box<dyn std::error::Error>> {
             std::fs::create_dir_all(dir)?;
+            write_new(
+                &dir.join(concat!($prefix, "_nova_pp.bin")),
+                &to_bytes(&p.nova_params.0)?,
+            )?;
+            write_new(
+                &dir.join(concat!($prefix, "_nova_vp.bin")),
+                &to_bytes(&p.nova_params.1)?,
+            )?;
+            write_new(
+                &dir.join(concat!($prefix, "_decider_pp.bin")),
+                &to_bytes(&p.decider_pp)?,
+            )?;
+            write_new(
+                &dir.join(concat!($prefix, "_decider_vp.bin")),
+                &to_bytes(&p.decider_vp)?,
+            )?;
+            Ok(())
+        }
 
-            let pp_path = dir.join(concat!($prefix, "_nova_pp.bin"));
-            let vp_path = dir.join(concat!($prefix, "_nova_vp.bin"));
-            let dpp_path = dir.join(concat!($prefix, "_decider_pp.bin"));
-            let dvp_path = dir.join(concat!($prefix, "_decider_vp.bin"));
-
-            if pp_path.exists() && vp_path.exists() && dpp_path.exists() && dvp_path.exists() {
-                let nova_pp =
-                    <$n as FoldingScheme<G1, G2, $fc>>::ProverParam::deserialize_uncompressed(
-                        &mut std::fs::read(&pp_path)?.as_slice(),
-                    )?;
-                let nova_vp = <$n as FoldingScheme<G1, G2, $fc>>::vp_deserialize_with_mode(
-                    &mut std::fs::read(&vp_path)?.as_slice(),
-                    ark_serialize::Compress::No,
-                    ark_serialize::Validate::No,
-                    $fc_params.clone(),
+        /// LOAD FROM FS: reads the four artifact files. Never generates.
+        pub fn $read(dir: &Path) -> Result<$holder, Box<dyn std::error::Error>> {
+            let nova_pp =
+                <$n as FoldingScheme<G1, G2, $fc>>::ProverParam::deserialize_uncompressed(
+                    &mut read_bytes(&dir.join(concat!($prefix, "_nova_pp.bin")))?.as_slice(),
                 )?;
-                let decider_pp =
-                    <$d as Decider<G1, G2, $fc, $n>>::ProverParam::deserialize_uncompressed(
-                        &mut std::fs::read(&dpp_path)?.as_slice(),
-                    )?;
-                let decider_vp =
-                    <$d as Decider<G1, G2, $fc, $n>>::VerifierParam::deserialize_uncompressed(
-                        &mut std::fs::read(&dvp_path)?.as_slice(),
-                    )?;
-                Ok((nova_pp, nova_vp, decider_pp, decider_vp))
-            } else {
-                let f_circuit = <$fc>::new($fc_params.clone())?;
-                let poseidon_config = poseidon_canonical_config::<Fr>();
-                let mut rng = ark_std::rand::rngs::OsRng;
-
-                let prep = PreprocessorParam::new(poseidon_config.clone(), f_circuit.clone());
-                let nova_params = <$n as FoldingScheme<G1, G2, $fc>>::preprocess(&mut rng, &prep)?;
-
-                let (decider_pp, decider_vp) = <$d as Decider<G1, G2, $fc, $n>>::preprocess(
-                    &mut rng,
-                    (nova_params.clone(), f_circuit.state_len()),
+            let nova_vp = <$n as FoldingScheme<G1, G2, $fc>>::vp_deserialize_with_mode(
+                &mut read_bytes(&dir.join(concat!($prefix, "_nova_vp.bin")))?.as_slice(),
+                ark_serialize::Compress::No,
+                ark_serialize::Validate::No,
+                $fc_params.clone(),
+            )?;
+            let decider_pp =
+                <$d as Decider<G1, G2, $fc, $n>>::ProverParam::deserialize_uncompressed(
+                    &mut read_bytes(&dir.join(concat!($prefix, "_decider_pp.bin")))?.as_slice(),
                 )?;
+            let decider_vp =
+                <$d as Decider<G1, G2, $fc, $n>>::VerifierParam::deserialize_uncompressed(
+                    &mut read_bytes(&dir.join(concat!($prefix, "_decider_vp.bin")))?.as_slice(),
+                )?;
+            Ok($holder {
+                nova_params: (nova_pp, nova_vp),
+                decider_pp,
+                decider_vp,
+            })
+        }
 
-                let mut buf = vec![];
-                nova_params.0.serialize_uncompressed(&mut buf)?;
-                std::fs::write(&pp_path, buf)?;
-                let mut buf = vec![];
-                nova_params.1.serialize_uncompressed(&mut buf)?;
-                std::fs::write(&vp_path, buf)?;
-                let mut buf = vec![];
-                decider_pp.serialize_uncompressed(&mut buf)?;
-                std::fs::write(&dpp_path, buf)?;
-                let mut buf = vec![];
-                decider_vp.serialize_uncompressed(&mut buf)?;
-                std::fs::write(&dvp_path, buf)?;
-
-                Ok((nova_params.0, nova_params.1, decider_pp, decider_vp))
-            }
+        /// SAVE TO MEMORY: process-wide cache over the fs load. Never generates.
+        pub fn $cached() -> Result<&'static $holder, Box<dyn std::error::Error>> {
+            static CACHE: std::sync::OnceLock<Result<$holder, String>> = std::sync::OnceLock::new();
+            CACHE
+                .get_or_init(|| $read(Path::new(ARTIFACTS_DIR)).map_err(|e| e.to_string()))
+                .as_ref()
+                .map_err(|e| e.clone().into())
         }
     };
 }
 
-cached_params!(
+nova_artifact_set!(
     "root",
-    load_root_params,
+    RootParams,
     RootTransitionCircuit,
     RootN,
     RootD,
-    ()
+    (),
+    create = create_root_params,
+    read = read_root_params,
+    write = write_root_params,
+    cached = cached_root_params
 );
-cached_params!(
+nova_artifact_set!(
     "withdraw",
-    load_withdraw_params,
+    WithdrawParams,
     WithdrawCircuit,
     WithdrawN,
     WithdrawD,
-    ()
+    (),
+    create = create_withdraw_params,
+    read = read_withdraw_params,
+    write = write_withdraw_params,
+    cached = cached_withdraw_params
 );
 
+// ---- single-step Groth16 artifact families (single_root / single_withdraw) ----
+
+macro_rules! groth16_artifact_set {
+    ($prefix:literal, $circuit:ty,
+     create = $create:ident, read = $read:ident, write = $write:ident, cached = $cached:ident,
+     render_verifier = $render:ident) => {
+        /// CREATE: fresh Groth16 keys in memory. No fs, no cache.
+        pub fn $create()
+        -> Result<(ProvingKey<Bn254>, VerifyingKey<Bn254>), Box<dyn std::error::Error>> {
+            let mut rng = ark_std::rand::rngs::OsRng;
+            let pk = Groth16::<Bn254>::generate_random_parameters_with_reduction(
+                <$circuit>::default(),
+                &mut rng,
+            )?;
+            Ok((pk.clone(), pk.vk.clone()))
+        }
+
+        /// SAVE TO FS: writes pk/vk. Never generates, never overwrites.
+        pub fn $write(
+            dir: &Path,
+            pk: &ProvingKey<Bn254>,
+            vk: &VerifyingKey<Bn254>,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            std::fs::create_dir_all(dir)?;
+            write_new(&dir.join(concat!($prefix, "_g16_pk.bin")), &to_bytes(pk)?)?;
+            write_new(&dir.join(concat!($prefix, "_g16_vk.bin")), &to_bytes(vk)?)?;
+            Ok(())
+        }
+
+        /// LOAD FROM FS. Never generates.
+        pub fn $read(
+            dir: &Path,
+        ) -> Result<(ProvingKey<Bn254>, VerifyingKey<Bn254>), Box<dyn std::error::Error>> {
+            let pk = ProvingKey::<Bn254>::deserialize_uncompressed(
+                &mut read_bytes(&dir.join(concat!($prefix, "_g16_pk.bin")))?.as_slice(),
+            )?;
+            let vk = VerifyingKey::<Bn254>::deserialize_uncompressed(
+                &mut read_bytes(&dir.join(concat!($prefix, "_g16_vk.bin")))?.as_slice(),
+            )?;
+            Ok((pk, vk))
+        }
+
+        /// SAVE TO MEMORY: process-wide cache over the fs load. Never generates.
+        pub fn $cached()
+        -> Result<&'static (ProvingKey<Bn254>, VerifyingKey<Bn254>), Box<dyn std::error::Error>> {
+            static CACHE: std::sync::OnceLock<
+                Result<(ProvingKey<Bn254>, VerifyingKey<Bn254>), String>,
+            > = std::sync::OnceLock::new();
+            CACHE
+                .get_or_init(|| $read(Path::new(ARTIFACTS_DIR)).map_err(|e| e.to_string()))
+                .as_ref()
+                .map_err(|e| e.clone().into())
+        }
+
+        /// RENDER: standalone Groth16 Solidity verifier from a verifying key. No fs.
+        pub fn $render(vk: &VerifyingKey<Bn254>) -> Result<String, Box<dyn std::error::Error>> {
+            let g16_vk = Groth16VerifierKey::from(vk.clone());
+            Ok(String::from_utf8(g16_vk.render_as_template(None))?)
+        }
+    };
+}
+
+groth16_artifact_set!(
+    "single_root_transition",
+    SingleRootTransitionCircuit,
+    create = create_single_root_params,
+    read = read_single_root_params,
+    write = write_single_root_params,
+    cached = cached_single_root_params,
+    render_verifier = render_single_root_transition_verifier
+);
+groth16_artifact_set!(
+    "single_withdraw",
+    SingleWithdrawCircuit,
+    create = create_single_withdraw_params,
+    read = read_single_withdraw_params,
+    write = write_single_withdraw_params,
+    cached = cached_single_withdraw_params,
+    render_verifier = render_single_withdraw_verifier
+);
+
+// ---- proving ----
+
 macro_rules! prove_for {
-    ($name:ident, $loader:ident, $fc:ty, $n:ty, $d:ty) => {
+    ($name:ident, $acc:ident, $fc:ty, $n:ty, $d:ty) => {
         pub fn $name(
             f_circuit: $fc,
             z_0: Vec<Fr>,
@@ -149,15 +306,13 @@ macro_rules! prove_for {
             use std::time::Instant;
 
             let load_start = Instant::now();
-            let (nova_pp, nova_vp, decider_pp, _) = $loader()?;
+            let params = $acc()?;
             info!(proof = stringify!($name), phase = "load_params", elapsed = ?load_start.elapsed());
-            let nova_params = (nova_pp, nova_vp);
-
             let rng = ark_std::rand::rngs::OsRng;
 
             let init_start = Instant::now();
             let mut nova =
-                <$n as FoldingScheme<G1, G2, $fc>>::init(&nova_params, f_circuit.clone(), z_0)?;
+                <$n as FoldingScheme<G1, G2, $fc>>::init(&params.nova_params, f_circuit.clone(), z_0)?;
             eprintln!("[{}] init={:?}", stringify!($name), init_start.elapsed());
 
             let n_steps = external_inputs.len();
@@ -168,13 +323,12 @@ macro_rules! prove_for {
             let fold_elapsed = fold_start.elapsed();
 
             let decider_start = Instant::now();
-            let proof = <$d as Decider<G1, G2, $fc, $n>>::prove(rng, decider_pp, nova.clone())?;
+            let proof = <$d as Decider<G1, G2, $fc, $n>>::prove(rng, params.decider_pp.clone(), nova.clone())?;
             let decider_elapsed = decider_start.elapsed();
 
-            let avg = if n_steps > 0 {
-                format!("{:?}/step", fold_elapsed / n_steps as u32)
-            } else {
-                "n/a".to_string()
+            let avg = match n_steps {
+                0 => "n/a".to_string(),
+                n => format!("{:?}/step", fold_elapsed / n as u32),
             };
             eprintln!(
                 "[{}] steps={} fold={:?} ({}) decider={:?}",
@@ -208,24 +362,26 @@ macro_rules! prove_for {
 
 prove_for!(
     prove_root_transition,
-    load_root_params,
+    cached_root_params,
     RootTransitionCircuit,
     RootN,
     RootD
 );
 prove_for!(
     prove_withdraw,
-    load_withdraw_params,
+    cached_withdraw_params,
     WithdrawCircuit,
     WithdrawN,
     WithdrawD
 );
 
-macro_rules! gen_verifier_for {
-    ($name:ident, $loader:ident, $d:ty, $state_len:expr) => {
-        pub fn $name() -> Result<String, Box<dyn std::error::Error>> {
-            let (_nova_pp, _nova_vp, _decider_pp, decider_vp) = $loader()?;
-            let nova_cyclefold_vk = NovaCycleFoldVerifierKey::from((decider_vp, $state_len));
+// ---- decider verifier rendering (pure: key -> Solidity) ----
+
+macro_rules! render_decider_verifier_for {
+    ($name:ident, $dvp:ty, $state_len:expr) => {
+        pub fn $name(decider_vp: &$dvp) -> Result<String, Box<dyn std::error::Error>> {
+            let nova_cyclefold_vk =
+                NovaCycleFoldVerifierKey::from((decider_vp.clone(), $state_len));
             Ok(get_decider_template_for_cyclefold_decider(
                 nova_cyclefold_vk,
             ))
@@ -233,39 +389,25 @@ macro_rules! gen_verifier_for {
     };
 }
 
-gen_verifier_for!(gen_root_transition_verifier, load_root_params, RootD, 3);
-gen_verifier_for!(gen_withdraw_verifier, load_withdraw_params, WithdrawD, 4);
+render_decider_verifier_for!(render_root_transition_verifier, RootDeciderVp, 3);
+render_decider_verifier_for!(render_withdraw_verifier, WithdrawDeciderVp, 4);
 
-/// Cached Groth16 proving/verifying keys for the single-withdraw circuit.
-pub fn load_single_withdraw_params()
--> Result<(ProvingKey<Bn254>, VerifyingKey<Bn254>), Box<dyn std::error::Error>> {
-    let dir = std::path::Path::new("artifacts");
-    std::fs::create_dir_all(dir)?;
-    let pk_path = dir.join("single_withdraw_g16_pk.bin");
-    let vk_path = dir.join("single_withdraw_g16_vk.bin");
-
-    if pk_path.exists() && vk_path.exists() {
-        let pk = ProvingKey::<Bn254>::deserialize_uncompressed(
-            &mut std::fs::read(&pk_path)?.as_slice(),
-        )?;
-        let vk = VerifyingKey::<Bn254>::deserialize_uncompressed(
-            &mut std::fs::read(&vk_path)?.as_slice(),
-        )?;
-        Ok((pk, vk))
-    } else {
-        let mut rng = ark_std::rand::rngs::OsRng;
-        let pk = Groth16::<Bn254>::generate_random_parameters_with_reduction(
-            SingleWithdrawCircuit::default(),
-            &mut rng,
-        )?;
-        let mut buf = vec![];
-        pk.serialize_uncompressed(&mut buf)?;
-        std::fs::write(&pk_path, buf)?;
-        let mut buf = vec![];
-        pk.vk.serialize_uncompressed(&mut buf)?;
-        std::fs::write(&vk_path, buf)?;
-        Ok((pk.clone(), pk.vk.clone()))
-    }
+/// Prove a one-leaf root transition. Returns (proof, public_inputs).
+pub fn prove_single_root_transition(
+    circuit: SingleRootTransitionCircuit,
+) -> Result<(ark_groth16::Proof<Bn254>, Vec<Fr>), Box<dyn std::error::Error>> {
+    let params = cached_single_root_params()?;
+    let mut rng = ark_std::rand::rngs::OsRng;
+    let public_inputs = vec![
+        circuit.z_0[0],
+        circuit.z_0[1],
+        circuit.z_0[2],
+        circuit.z_1[0],
+        circuit.z_1[1],
+        circuit.z_1[2],
+    ];
+    let proof = Groth16::<Bn254>::prove(&params.0, circuit, &mut rng)?;
+    Ok((proof, public_inputs))
 }
 
 /// Prove a single withdrawal. Returns (proof, public_inputs).
@@ -274,7 +416,7 @@ pub fn prove_single_withdraw(
 ) -> Result<(ark_groth16::Proof<Bn254>, Vec<Fr>), Box<dyn std::error::Error>> {
     use std::time::Instant;
     let start = Instant::now();
-    let (pk, _vk) = load_single_withdraw_params()?;
+    let params = cached_single_withdraw_params()?;
     let mut rng = ark_std::rand::rngs::OsRng;
     let public_inputs = vec![
         circuit.transfer_root,
@@ -282,16 +424,9 @@ pub fn prove_single_withdraw(
         circuit.index_with_offset,
         circuit.witness.value,
     ];
-    let proof = Groth16::<Bn254>::prove(&pk, circuit, &mut rng)?;
+    let proof = Groth16::<Bn254>::prove(&params.0, circuit, &mut rng)?;
     info!(proof = "prove_single_withdraw", elapsed = ?start.elapsed(), "single-withdraw Groth16 proof done");
     Ok((proof, public_inputs))
-}
-
-/// Standalone Groth16 Solidity verifier (not the Nova opaque decider).
-pub fn gen_single_withdraw_verifier() -> Result<String, Box<dyn std::error::Error>> {
-    let (_pk, vk) = load_single_withdraw_params()?;
-    let g16_vk = Groth16VerifierKey::from(vk);
-    Ok(String::from_utf8(g16_vk.render_as_template(None))?)
 }
 
 #[cfg(test)]
@@ -334,7 +469,7 @@ mod tests {
 
         let circuit = RootTransitionCircuit::new(()).unwrap();
         let calldata = prove_root_transition(circuit, z_0, witnesses)?;
-        let solidity_code = gen_root_transition_verifier()?;
+        let solidity_code = render_root_transition_verifier(&cached_root_params()?.decider_vp)?;
 
         let bytecode = compile_solidity(&solidity_code, "NovaDecider");
         let mut evm = Evm::default();
@@ -459,7 +594,7 @@ mod tests {
         let z_0 = vec![Fr::zero(), Fr::zero(), transfer_root, recipient];
         let circuit = WithdrawCircuit::new(())?;
         let calldata = prove_withdraw(circuit, z_0, vec![witness0, witness1])?;
-        let solidity_code = gen_withdraw_verifier()?;
+        let solidity_code = render_withdraw_verifier(&cached_withdraw_params()?.decider_vp)?;
 
         let bytecode = compile_solidity(&solidity_code, "NovaDecider");
         let mut evm = Evm::default();

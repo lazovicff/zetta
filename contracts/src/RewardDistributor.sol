@@ -35,13 +35,17 @@ contract RewardDistributor {
     }
 
     modifier updateReward(address account) {
+        _updateReward(account);
+        _;
+    }
+
+    function _updateReward(address account) internal {
         rewardPerTokenStored = rewardPerToken();
         lastUpdateTime = lastTimeRewardApplicable();
         if (account != address(0)) {
             rewards[account] = earned(account);
             userRewardPerTokenPaid[account] = rewardPerTokenStored;
         }
-        _;
     }
 
     function lastTimeRewardApplicable() public view returns (uint256) {

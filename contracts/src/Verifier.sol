@@ -11,6 +11,15 @@ interface IWithdrawVerifier {
     function verifyOpaqueNovaProof(uint256[34] calldata proof) external view returns (bool);
 }
 
+interface ISingleRootTransitionVerifier {
+    function verifyProof(
+        uint256[2] calldata pA,
+        uint256[2][2] calldata pB,
+        uint256[2] calldata pC,
+        uint256[6] calldata pubSignals
+    ) external view returns (bool);
+}
+
 interface ISingleWithdrawVerifier {
     function verifyProof(
         uint256[2] calldata pA,
@@ -35,6 +44,7 @@ contract Verifier {
 
     IRootTransitionVerifier public rootTransitionVerifier;
     IWithdrawVerifier public withdrawVerifier;
+    ISingleRootTransitionVerifier public singleRootTransitionVerifier;
     ISingleWithdrawVerifier public singleWithdrawVerifier;
 
     address public owner;
@@ -55,11 +65,13 @@ contract Verifier {
     function setVerifiers(
         IRootTransitionVerifier root_,
         IWithdrawVerifier withdraw_,
-        ISingleWithdrawVerifier single_
+        ISingleWithdrawVerifier singleWithdraw_,
+        ISingleRootTransitionVerifier singleRoot_
     ) external onlyOwner {
         rootTransitionVerifier = root_;
         withdrawVerifier = withdraw_;
-        singleWithdrawVerifier = single_;
+        singleWithdrawVerifier = singleWithdraw_;
+        singleRootTransitionVerifier = singleRoot_;
     }
 
     /// Snapshot the token's burn hash chain so updateRoot proofs have a stable target.
@@ -90,6 +102,28 @@ contract Verifier {
         transferRoot = newRoot;
         transferIndex = newIndex;
         transferHashChain = newHashChain;
+    }
+
+    /// Single-leaf epoch — Groth16 instead of the Nova decider (which needs >= 2 steps).
+    /// pubSignals = [prevIndex, prevHashChain, prevRoot, newIndex, newHashChain, newRoot]
+    function updateRootSingle(
+        uint256[2] calldata pA,
+        uint256[2][2] calldata pB,
+        uint256[2] calldata pC,
+        uint256[6] calldata pubSignals
+    ) external {
+        require(pubSignals[0] == transferIndex, "stale index");
+        require(pubSignals[1] == transferHashChain, "stale hash chain");
+        require(pubSignals[2] == transferRoot, "stale root");
+        require(pubSignals[3] == pubSignals[0] + 1, "not single-step");
+        require(pubSignals[4] == reservedHashChain, "hash chain mismatch");
+        require(pubSignals[3] == reservedIndex, "hash index mismatch");
+
+        require(singleRootTransitionVerifier.verifyProof(pA, pB, pC, pubSignals), "invalid proof");
+
+        transferRoot = pubSignals[5];
+        transferIndex = pubSignals[3];
+        transferHashChain = pubSignals[4];
     }
 
     /// proof = [i, z0[0..4], zi[0..4], 25 decider elements]
