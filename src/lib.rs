@@ -1,10 +1,6 @@
 pub mod burn;
 pub mod config;
-pub mod db;
 pub mod ids;
-pub mod indexer;
 pub mod server;
-pub mod state;
 pub mod tree;
-pub mod update_root;
 pub mod zkp;

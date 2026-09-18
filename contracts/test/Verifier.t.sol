@@ -40,7 +40,7 @@ contract MockSingleWithdrawVerifier is ISingleWithdrawVerifier {
         uint256[2] calldata,
         uint256[2][2] calldata,
         uint256[2] calldata,
-        uint256[4] calldata
+        uint256[3] calldata
     ) external view returns (bool) {
         return result;
     }
@@ -71,15 +71,17 @@ contract VerifierTest is Test {
     }
 
     function _updateRoot(uint256 newRoot) internal {
+        verifier.reserveHashChain(); // snapshot current burn hash chain
         uint256[32] memory proof;
-        proof[1] = 0;                    // new tree
-        proof[2] = verifier.transferHashChain();
-        proof[3] = INITIAL_ROOT;         // empty root
-        proof[4] = 1 << 18;              // full capacity
-        proof[5] = token.burnHashChain();
+        proof[1] = verifier.transferIndex();     // prevIndex
+        proof[2] = verifier.transferHashChain(); // prevHashChain
+        proof[3] = verifier.transferRoot();      // prevRoot
+        proof[4] = token.burnIndex();            // == reservedIndex
+        proof[5] = token.burnHashChain();        // == reservedHashChain
         proof[6] = newRoot;
         verifier.updateRoot(proof);
     }
+
 
     function test_compute_recipient_cross_language() view public {
         address addr = 0x1111111111111111111111111111111111111111;
@@ -98,7 +100,8 @@ contract VerifierTest is Test {
         uint256 newRoot = 12345;
         _updateRoot(newRoot);
 
-        assertEq(verifier.transferRoots(0), newRoot);
+        assertEq(verifier.transferRoot(), newRoot);
+        assertEq(verifier.transferIndex(), token.burnIndex());
         assertEq(verifier.transferHashChain(), token.burnHashChain());
     }
 
@@ -108,11 +111,12 @@ contract VerifierTest is Test {
 
         uint256[32] memory proof;
         proof[1] = 1; // wrong prevIndex (stored is 0)
+        proof[2] = verifier.transferHashChain();
         proof[3] = INITIAL_ROOT;
         proof[4] = token.burnIndex();
         proof[5] = token.burnHashChain();
         proof[6] = 12345;
-        vm.expectRevert("not a new tree");
+        vm.expectRevert("stale index");
         verifier.updateRoot(proof);
     }
 
@@ -128,12 +132,12 @@ contract VerifierTest is Test {
         uint256[34] memory wproof;
         wproof[3] = 12345;     // transferRoot
         wproof[4] = recipient; // recipient
-        wproof[6] = sum;       // sum
+        wproof[6] = sum;       // lifetime sum
 
         uint256 balBefore = token.balanceOf(bob);
-        verifier.withdraw(31337, bob, tweak, 0, wproof);
+        verifier.withdraw(31337, bob, tweak, wproof);
         assertEq(token.balanceOf(bob), balBefore + sum);
-        assertEq(verifier.totalWithdrawn(0, recipient), sum);
+        assertEq(verifier.totalWithdrawn(recipient), sum);
     }
 
     function test_withdraw_double_reverts() public {
@@ -149,10 +153,10 @@ contract VerifierTest is Test {
         wproof[4] = recipient;
         wproof[6] = 100 ether;
 
-        verifier.withdraw(31337, bob, tweak, 0, wproof);
+        verifier.withdraw(31337, bob, tweak, wproof);
 
         vm.expectRevert("nothing to withdraw");
-        verifier.withdraw(31337, bob, tweak, 0, wproof);
+        verifier.withdraw(31337, bob, tweak, wproof);
     }
 
     function test_withdraw_wrong_chain_reverts() public {
@@ -165,6 +169,6 @@ contract VerifierTest is Test {
         wproof[6] = 100 ether;
 
         vm.expectRevert("wrong chain");
-        verifier.withdraw(99999, bob, tweak, 0, wproof);
+        verifier.withdraw(99999, bob, tweak, wproof);
     }
 }

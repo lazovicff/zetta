@@ -16,31 +16,34 @@ interface ISingleWithdrawVerifier {
         uint256[2] calldata pA,
         uint256[2][2] calldata pB,
         uint256[2] calldata pC,
-        uint256[4] calldata pubSignals
+        uint256[3] calldata pubSignals
     ) external view returns (bool);
 }
 
 contract Verifier {
     zERC20 public token;
 
-    uint256[] public transferRoots;   // one per finalized tree
-    uint256 public transferHashChain; // global, continuous across trees
+    // Single ever-growing tree (depth 32). Frontier = state proven on-chain.
+    uint256 public transferRoot;
+    uint256 public transferIndex;      // leaves folded into transferRoot
+    uint256 public transferHashChain;
 
-    mapping(uint256 => mapping(uint256 => uint256)) public totalWithdrawn; // [rootIndex][recipient]
+    uint256 public reservedHashChain;
+    uint256 public reservedIndex;
+
+    mapping(uint256 => uint256) public totalWithdrawn; // recipient => lifetime sum already minted
 
     IRootTransitionVerifier public rootTransitionVerifier;
     IWithdrawVerifier public withdrawVerifier;
     ISingleWithdrawVerifier public singleWithdrawVerifier;
 
-    uint256 public immutable INITIAL_ROOT;
     address public owner;
 
     uint256 private constant HASH_CHAIN_MASK = (1 << 246) - 1;
-    uint256 private constant TREE_CAPACITY = 1 << 18;
 
     constructor(zERC20 token_, uint256 initialRoot_) {
         token = token_;
-        INITIAL_ROOT = initialRoot_;
+        transferRoot = initialRoot_;
         owner = msg.sender;
     }
 
@@ -59,9 +62,14 @@ contract Verifier {
         singleWithdrawVerifier = single_;
     }
 
+    /// Snapshot the token's burn hash chain so updateRoot proofs have a stable target.
+    function reserveHashChain() external onlyOwner {
+        reservedIndex = token.burnIndex();
+        reservedHashChain = token.burnHashChain();
+    }
 
     /// proof = [i, z0[0..3], zi[0..3], 25 decider elements]
-    /// z0 = [0, prevHashChain, emptyRoot], zi = [capacity, newHashChain, treeRoot]
+    /// z0 = [prevIndex, prevHashChain, prevRoot], zi = [newIndex, newHashChain, newRoot]
     function updateRoot(uint256[32] calldata proof) external {
         uint256 prevIndex = proof[1];
         uint256 prevHashChain = proof[2];
@@ -70,69 +78,69 @@ contract Verifier {
         uint256 newHashChain = proof[5];
         uint256 newRoot = proof[6];
 
-        require(prevIndex == 0, "not a new tree");
+        require(prevIndex == transferIndex, "stale index");
         require(prevHashChain == transferHashChain, "stale hash chain");
-        require(prevRoot == INITIAL_ROOT, "not empty root");
-        require(newIndex == TREE_CAPACITY, "tree not full");
-        require(newHashChain == token.burnHashChain(), "hash chain mismatch");
+        require(prevRoot == transferRoot, "stale root");
+        require(newIndex > prevIndex, "no progress");
+        require(newHashChain == reservedHashChain, "hash chain mismatch");
+        require(newIndex == reservedIndex, "hash index mismatch");
 
         require(rootTransitionVerifier.verifyOpaqueNovaProof(proof), "invalid proof");
 
-        transferRoots.push(newRoot);
+        transferRoot = newRoot;
+        transferIndex = newIndex;
         transferHashChain = newHashChain;
     }
 
     /// proof = [i, z0[0..4], zi[0..4], 25 decider elements]
-    function withdraw(uint256 chainId, address addr, bytes32 tweak, uint256 rootIndex, uint256[34] calldata proof) external {
+    /// z0[0] is the fold's start index — ordering token only, not checked here.
+    function withdraw(uint256 chainId, address addr, bytes32 tweak, uint256[34] calldata proof) external {
         require(chainId == block.chainid, "wrong chain");
 
         uint256 recipient = computeRecipient(chainId, addr, tweak);
 
-        uint256 root = proof[3];          // z0[2] = transferRoot
+        uint256 root = proof[3];           // z0[2] = transferRoot
         uint256 proofRecipient = proof[4]; // z0[3] = recipient
-        uint256 sum = proof[6];           // zi[1] = sum
+        uint256 sum = proof[6];            // zi[1] = lifetime sum for recipient
 
-        require(root == transferRoots[rootIndex], "unknown root");
+        require(root == transferRoot, "unknown root");
         require(proofRecipient == recipient, "recipient mismatch");
 
         require(withdrawVerifier.verifyOpaqueNovaProof(proof), "invalid proof");
 
-        uint256 delta = sum - totalWithdrawn[rootIndex][recipient];
+        uint256 delta = sum - totalWithdrawn[recipient];
         require(delta > 0, "nothing to withdraw");
-        totalWithdrawn[rootIndex][recipient] = sum;
+        totalWithdrawn[recipient] = sum;
 
         token.teleport(addr, delta);
     }
 
-    /// pubSignals = [transferRoot, recipient, indexWithOffset, value]
+    /// pubSignals = [transferRoot, recipient, value]
     function withdrawSingle(
         uint256 chainId,
         address addr,
         bytes32 tweak,
-        uint256 rootIndex,
         uint256[2] calldata pA,
         uint256[2][2] calldata pB,
         uint256[2] calldata pC,
-        uint256[4] calldata pubSignals
+        uint256[3] calldata pubSignals
     ) external {
         require(chainId == block.chainid, "wrong chain");
 
         uint256 recipient = computeRecipient(chainId, addr, tweak);
 
-        uint256 transferRoot = pubSignals[0];
+        uint256 transferRoot_ = pubSignals[0];
         uint256 proofRecipient = pubSignals[1];
-        uint256 indexWithOffset = pubSignals[2];
-        uint256 sum = pubSignals[3];
+        uint256 sum = pubSignals[2];
 
-        require(transferRoot == transferRoots[rootIndex], "unknown root");
+        require(transferRoot_ == transferRoot, "unknown root");
         require(proofRecipient == recipient, "recipient mismatch");
-        require(indexWithOffset == rootIndex * TREE_CAPACITY, "bad index offset");
 
         require(singleWithdrawVerifier.verifyProof(pA, pB, pC, pubSignals), "invalid proof");
 
-        uint256 delta = sum - totalWithdrawn[rootIndex][recipient];
+        uint256 delta = sum - totalWithdrawn[recipient];
         require(delta > 0, "nothing to withdraw");
-        totalWithdrawn[rootIndex][recipient] = sum;
+        totalWithdrawn[recipient] = sum;
 
         token.teleport(addr, delta);
     }
@@ -144,9 +152,5 @@ contract Verifier {
     {
         bytes32 h = keccak256(abi.encodePacked(uint64(chainId), addr, tweak));
         return uint256(h) & HASH_CHAIN_MASK;
-    }
-
-    function transferRootsLength() external view returns (uint256) {
-        return transferRoots.length;
     }
 }

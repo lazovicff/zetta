@@ -142,24 +142,6 @@ impl Db {
             .map_err(Into::into)
     }
 
-    pub async fn latest_registration_by_user_id(
-        &self,
-        user_id: &str,
-    ) -> Result<Option<Registration>, Box<dyn std::error::Error>> {
-        let row = sqlx::query(
-            "SELECT burn_address, created_at, pubkey_x, pubkey_y, sig_r_x, sig_r_y, sig_z, salt, recipient, user_id
-             FROM registrations
-             WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1",
-        )
-        .bind(user_id)
-        .fetch_optional(&self.0)
-        .await?;
-        row.as_ref()
-            .map(row_to_registration)
-            .transpose()
-            .map_err(Into::into)
-    }
-
     pub async fn total_spent(&self, pubkey_x: Fr) -> Result<U256, Box<dyn std::error::Error>> {
         let rows = sqlx::query(
             "SELECT DISTINCT ON (provider_ref) amount, status

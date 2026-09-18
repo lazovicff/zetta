@@ -1,4 +1,4 @@
-use zetta::server;
+use zetta::server::worker;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -9,5 +9,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    server::run().await
+    worker::run().await
 }

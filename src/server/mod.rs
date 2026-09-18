@@ -1,0 +1,73 @@
+mod api;
+mod db;
+mod state;
+pub mod worker;
+
+use crate::server::db::Db;
+use crate::server::state::State;
+use alloy::primitives::U256;
+use alloy::sol;
+use ark_bn254::{Fq, Fr};
+use ark_ff::PrimeField;
+use std::sync::{Arc, Mutex};
+
+sol! {
+    event Transfer(address indexed from, address indexed to, uint256 value);
+}
+
+sol! {
+    #[sol(rpc)]
+    interface IVerifier {
+        function updateRoot(uint256[32] proof) external;
+        function reserveHashChain() external;
+        function reservedIndex() external view returns (uint256);
+        function reservedHashChain() external view returns (uint256);
+        function transferIndex() external view returns (uint256);
+        function withdraw(uint256 chainId, address addr, bytes32 tweak, uint256[34] proof) external;
+        function withdrawSingle(uint256 chainId, address addr, bytes32 tweak, uint256[2] pA, uint256[2][2] pB, uint256[2] pC, uint256[3] pubSignals) external;
+    }
+}
+
+type SharedState = Arc<Mutex<State>>;
+
+#[derive(Clone)]
+struct AppState {
+    state: SharedState,
+    db: Db,
+}
+
+fn u256_to_fr(v: U256) -> Fr {
+    let bytes: [u8; 32] = v.to_be_bytes();
+    Fr::from_be_bytes_mod_order(&bytes)
+}
+
+fn fq_to_u256(x: Fq) -> U256 {
+    U256::from_be_slice(&crate::server::db::fr_to_blob(x))
+}
+
+fn decode_opaque_proof<const N: usize>(calldata: &[u8]) -> [U256; N] {
+    let mut out = [U256::ZERO; N];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let start = 4 + i * 32;
+        let mut b = [0u8; 32];
+        b.copy_from_slice(&calldata[start..start + 32]);
+        *slot = U256::from_be_bytes(b);
+    }
+    out
+}
+
+fn parse_hex20(s: &str) -> Result<[u8; 20], String> {
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    let b = hex::decode(s).map_err(|e| e.to_string())?;
+    b.try_into().map_err(|_| "expected 20 bytes".to_string())
+}
+
+fn parse_decimal_fr(s: &str) -> Result<Fr, String> {
+    let n = num_bigint::BigUint::parse_bytes(s.as_bytes(), 10).ok_or("invalid decimal")?;
+    Ok(Fr::from_be_bytes_mod_order(&n.to_bytes_be()))
+}
+
+fn parse_decimal_fq(s: &str) -> Result<Fq, String> {
+    let n = num_bigint::BigUint::parse_bytes(s.as_bytes(), 10).ok_or("invalid decimal")?;
+    Ok(Fq::from_be_bytes_mod_order(&n.to_bytes_be()))
+}

@@ -5,16 +5,15 @@ use ark_ff::Zero;
 
 use crate::zkp::{poseidon2, poseidon3};
 
-pub const TREE_DEPTH: usize = 18;
-pub const TREE_CAPACITY: usize = 1 << TREE_DEPTH; // 262144
+pub const TREE_DEPTH: usize = 32;
 
-/// Append-only Poseidon binary Merkle tree.
+/// Append-only Poseidon binary Merkle tree with all levels materialized.
+/// levels[0] = leaves … levels[depth] = [root]. Proof queries are O(depth),
+/// at the cost of 2^(depth+1)-1 stored nodes when full.
 pub struct MerkleTree {
     depth: usize,
-    leaves: Vec<Fr>,
-    zero_hashes: Vec<Fr>,     // zero_hashes[h] = empty subtree of height h
-    filled_subtrees: Vec<Fr>, // filled_subtrees[h] = rightmost complete subtree of height h
-    root: Fr,
+    levels: Vec<Vec<Fr>>, // levels[h].len() == ceil(leaves / 2^h)
+    zero_hashes: Vec<Fr>, // zero_hashes[h] = empty subtree of height h
 }
 
 impl MerkleTree {
@@ -26,107 +25,76 @@ impl MerkleTree {
             z = poseidon2(z, z).expect("poseidon");
             zero_hashes.push(z);
         }
-        let root = zero_hashes[depth];
         Self {
             depth,
-            leaves: Vec::new(),
+            levels: vec![Vec::new(); depth + 1],
             zero_hashes,
-            filled_subtrees: vec![Fr::zero(); depth],
-            root,
         }
     }
 
     pub fn root(&self) -> Fr {
-        self.root
+        match self.levels[self.depth].first() {
+            Some(&r) => r,
+            None => self.zero_hashes[self.depth],
+        }
     }
 
     pub fn len(&self) -> usize {
-        self.leaves.len()
+        self.levels[0].len()
     }
 
-    /// Append a leaf; returns the new root. O(depth) — updates only the path
-    /// from the inserted leaf to the root.
+    /// Append a leaf; returns the new root. O(depth) hashes; every level is
+    /// updated in place so proofs never recompute the tree.
     pub fn insert(&mut self, leaf: Fr) -> Fr {
-        let index = self.leaves.len();
-        self.leaves.push(leaf);
-
+        assert!(self.len() < 1 << self.depth, "tree full");
+        let mut idx = self.len();
+        self.levels[0].push(leaf);
         let mut current = leaf;
-        let mut idx = index;
+
         for h in 0..self.depth {
-            if idx & 1 == 0 {
-                // Left child: right sibling is empty; record this node as the
-                // level's filled left subtree for a future right child.
-                self.filled_subtrees[h] = current;
-                current = poseidon2(current, self.zero_hashes[h]).expect("poseidon");
+            current = if idx & 1 == 0 {
+                // Left child: create the parent node at the next level.
+                let p = poseidon2(current, self.zero_hashes[h]).expect("poseidon");
+                self.levels[h + 1].push(p);
+                p
             } else {
-                // Right child: combine with the stored left sibling.
-                current = poseidon2(self.filled_subtrees[h], current).expect("poseidon");
-            }
+                // Right child: update the existing parent node.
+                let p = poseidon2(self.levels[h][idx - 1], current).expect("poseidon");
+                let last = self.levels[h + 1].len() - 1;
+                self.levels[h + 1][last] = p;
+                p
+            };
             idx >>= 1;
         }
-        self.root = current;
-        self.root
+        current
     }
 
     /// Siblings from leaf level up to root (length == depth).
     pub fn proof(&self, index: usize) -> Vec<Fr> {
-        assert!(index < self.leaves.len(), "index out of range");
-        let mut proof = Vec::with_capacity(self.depth);
-        let mut idx = index;
-        let mut level = self.leaves.clone();
-        let mut h = 0;
-        while h < self.depth {
-            let sibling = if (idx ^ 1) < level.len() {
-                level[idx ^ 1]
-            } else {
-                self.zero_hashes[h]
-            };
-            proof.push(sibling);
-            idx >>= 1;
-            level = next_level(&level, self.zero_hashes[h]);
-            h += 1;
-        }
-        proof
+        assert!(index < self.len(), "index out of range");
+        self.path(index)
     }
 
     /// Siblings for the (empty) leaf at `index`, where `index == self.len()`.
     pub fn proof_for_empty(&self, index: usize) -> Vec<Fr> {
-        assert_eq!(
-            index,
-            self.leaves.len(),
-            "index must be the next empty slot"
-        );
+        assert_eq!(index, self.len(), "index must be the next empty slot");
+        self.path(index)
+    }
+
+    fn path(&self, index: usize) -> Vec<Fr> {
         let mut proof = Vec::with_capacity(self.depth);
         let mut idx = index;
-        let mut level = self.leaves.clone();
-        let mut h = 0;
-        while h < self.depth {
-            let sibling = if (idx ^ 1) < level.len() {
-                level[idx ^ 1]
+        for h in 0..self.depth {
+            let sib = idx ^ 1;
+            proof.push(if sib < self.levels[h].len() {
+                self.levels[h][sib]
             } else {
                 self.zero_hashes[h]
-            };
-            proof.push(sibling);
+            });
             idx >>= 1;
-            level = next_level(&level, self.zero_hashes[h]);
-            h += 1;
         }
         proof
     }
-}
-
-fn next_level(level: &[Fr], zero: Fr) -> Vec<Fr> {
-    let mut next = Vec::with_capacity((level.len() + 1) / 2);
-    for i in (0..level.len()).step_by(2) {
-        let left = level[i];
-        let right = if i + 1 < level.len() {
-            level[i + 1]
-        } else {
-            zero
-        };
-        next.push(poseidon2(left, right).expect("poseidon"));
-    }
-    next
 }
 
 /// One hash-chain step: `poseidon3(prev, address_to_fr(to), value)`.
@@ -183,7 +151,7 @@ mod tests {
 
     #[test]
     fn empty_tree_root_is_zero_hash() {
-        let tree = MerkleTree::new(32);
+        let tree = MerkleTree::new(TREE_DEPTH);
         let mut z = poseidon2(Fr::zero(), Fr::zero()).unwrap();
         for _ in 0..32 {
             z = poseidon2(z, z).unwrap();
@@ -193,7 +161,7 @@ mod tests {
 
     #[test]
     fn insert_and_verify_proofs() {
-        let mut tree = MerkleTree::new(32);
+        let mut tree = MerkleTree::new(TREE_DEPTH);
         let leaves: Vec<Fr> = (0..5).map(|i| Fr::from(i as u64 + 1)).collect();
         for &l in &leaves {
             tree.insert(l);
