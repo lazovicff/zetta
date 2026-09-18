@@ -45,6 +45,7 @@ impl MerkleTree {
 
     /// Append a leaf; returns the new root. O(depth) hashes; every level is
     /// updated in place so proofs never recompute the tree.
+    // src/tree.rs — MerkleTree::insert
     pub fn insert(&mut self, leaf: Fr) -> Fr {
         assert!(self.len() < 1 << self.depth, "tree full");
         let mut idx = self.len();
@@ -52,18 +53,19 @@ impl MerkleTree {
         let mut current = leaf;
 
         for h in 0..self.depth {
-            current = if idx & 1 == 0 {
-                // Left child: create the parent node at the next level.
-                let p = poseidon2(current, self.zero_hashes[h]).expect("poseidon");
-                self.levels[h + 1].push(p);
-                p
+            let parent = if idx & 1 == 0 {
+                // Left child: right sibling is the (conceptually empty) zero subtree.
+                poseidon2(current, self.zero_hashes[h]).expect("poseidon")
             } else {
-                // Right child: update the existing parent node.
-                let p = poseidon2(self.levels[h][idx - 1], current).expect("poseidon");
-                let last = self.levels[h + 1].len() - 1;
-                self.levels[h + 1][last] = p;
-                p
+                poseidon2(self.levels[h][idx - 1], current).expect("poseidon")
             };
+            let parent_idx = idx >> 1;
+            if parent_idx < self.levels[h + 1].len() {
+                self.levels[h + 1][parent_idx] = parent; // node exists: update in place
+            } else {
+                self.levels[h + 1].push(parent); // first node at this slot: create
+            }
+            current = parent;
             idx >>= 1;
         }
         current

@@ -15,7 +15,7 @@ use crate::server::db::{Registration, fr_to_u256, unix_now};
 use crate::server::{AppState, parse_decimal_fq, parse_decimal_fr, parse_hex20};
 use crate::zkp::{poseidon2, poseidon3};
 
-pub fn spawn_http_server(app: AppState, port: u16) {
+pub fn spawn_http_server(app: AppState, listener: tokio::net::TcpListener) {
     tokio::spawn(async move {
         let router = Router::new()
             .route("/health", get(health))
@@ -26,9 +26,6 @@ pub fn spawn_http_server(app: AppState, port: u16) {
             .route("/cards", post(order_card))
             .route("/status", get(status))
             .with_state(app);
-        let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
-            .await
-            .unwrap();
         axum::serve(listener, router).await.unwrap();
     });
 }

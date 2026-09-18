@@ -1,6 +1,6 @@
-mod api;
-mod db;
-mod state;
+pub mod api;
+pub mod db;
+pub mod state;
 pub mod worker;
 
 use crate::server::db::Db;
@@ -29,12 +29,12 @@ sol! {
     }
 }
 
-type SharedState = Arc<Mutex<State>>;
+pub type SharedState = Arc<Mutex<State>>;
 
 #[derive(Clone)]
-struct AppState {
-    state: SharedState,
-    db: Db,
+pub struct AppState {
+    pub state: SharedState,
+    pub db: Db,
 }
 
 fn u256_to_fr(v: U256) -> Fr {

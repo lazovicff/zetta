@@ -1,24 +1,21 @@
 use alloy::primitives::{Address, B256, U256};
-use alloy::providers::{Provider, ProviderBuilder};
+use alloy::providers::Provider;
 use alloy::rpc::types::Filter;
-use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolEvent;
 use ark_bn254::{Fq, Fr};
 use ark_ff::Zero;
 use ark_grumpkin::{Affine as G2Affine, Projective as G2};
 
 use folding_schemes::frontend::FCircuit;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::burn::{address_to_fr, recipient};
 use crate::config::Config;
-use crate::server::api::spawn_http_server;
 use crate::server::db::{Db, fr_to_u256};
 use crate::server::state::State;
 use crate::server::{
-    AppState, IVerifier, SharedState, Transfer, decode_opaque_proof, fq_to_u256, u256_to_fr,
+    IVerifier, SharedState, Transfer, decode_opaque_proof, fq_to_u256, u256_to_fr,
 };
 use crate::tree::TREE_DEPTH;
 use crate::zkp::{
@@ -28,57 +25,21 @@ use crate::zkp::{
 };
 use crate::zkp::{poseidon2, prove_single_root_transition};
 
-pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    info!(stage = "boot", "loading config");
-    let config = Config::from_env()?;
-    info!(stage = "boot", chain_id = config.chain_id, rpc = %config.rpc_url, port = config.port, "config loaded");
-
-    info!(stage = "boot", "loading proving params");
-    let t = std::time::Instant::now();
-    crate::zkp::cached_root_params()?;
-    crate::zkp::cached_withdraw_params()?;
-    crate::zkp::cached_single_root_params()?;
-    crate::zkp::cached_single_withdraw_params()?;
-    info!(stage = "boot", elapsed = ?t.elapsed(), "proving params loaded");
-
-    let signer: PrivateKeySigner = config.private_key.parse()?;
-    let exchange_addr = signer.address().into_array();
-    let provider = ProviderBuilder::new()
-        .wallet(signer)
-        .connect_http(config.rpc_url.parse()?);
-    let state: SharedState = Arc::new(Mutex::new(State::new(
-        &config,
-        config.chain_id,
-        exchange_addr,
-    )?));
-
-    let db = Db::open(&config.database_url).await?;
-    info!(stage = "boot", "database connected");
-
-    hydrate_registrations(&state, &db).await?;
-
-    log_recipient(&state);
-    info!(
-        stage = "boot",
-        "spawning HTTP server on port {}", config.port
-    );
-    spawn_http_server(
-        AppState {
-            state: state.clone(),
-            db,
-        },
-        config.port,
-    );
-
+pub async fn run(
+    state: &SharedState,
+    provider: &impl Provider,
+    config: &Config,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // ---- initial chain sync, once ----
     let mut last_block = catch_up(&state, &provider, &config).await?;
-    info!(stage = "catchup", last_block, "catch-up complete");
+    tracing::info!(stage = "catchup", last_block, "catch-up complete");
 
     loop {
-        last_block = indexer_step(&state, &provider, &config, last_block).await?;
-        if let Some((z_0, witnesses)) = commit_leaves(&state, &provider, &config).await? {
-            do_update_root(&state, &provider, &config, z_0, witnesses).await?;
+        last_block = indexer_step(state, provider, config, last_block).await?;
+        if let Some((z_0, witnesses)) = commit_leaves(state, provider, config).await? {
+            do_update_root(state, provider, config, z_0, witnesses).await?;
         }
-        do_withdraw(&state, &provider, &config).await?;
+        do_withdraw(state, provider, config).await?;
         debug!(stage = "idle", "sleeping {}s", config.poll_interval_secs);
         tokio::time::sleep(Duration::from_secs(config.poll_interval_secs)).await;
     }
@@ -108,7 +69,7 @@ where
 }
 
 /// Load persisted registrations into the in-memory state.
-async fn hydrate_registrations(
+pub async fn hydrate_registrations(
     state: &SharedState,
     db: &Db,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -185,7 +146,7 @@ fn apply_transfer(
     Ok(witness)
 }
 
-fn log_recipient(state: &SharedState) {
+pub fn log_recipient(state: &SharedState) {
     let s = state.lock().unwrap();
     let r = recipient(s.chain_id, s.exchange_addr, s.tweak);
     info!(stage = "boot", recipient = %r, "exchange recipient");
