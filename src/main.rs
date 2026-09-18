@@ -1,6 +1,7 @@
 use alloy::providers::ProviderBuilder;
 use alloy::signers::local::PrivateKeySigner;
 use std::sync::{Arc, Mutex};
+use zetta::server::worker::catch_up;
 
 use zetta::config::Config;
 use zetta::server::db::Db;
@@ -64,15 +65,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     tracing::info!(stage = "boot", port = config.port, "HTTP server bound");
 
+    // ---- initial chain sync, once ----
+    let mut last_block = catch_up(&state, &provider, &config).await?;
+    tracing::info!(stage = "catchup", last_block, "catch-up complete");
+
     // ---- worker retry loop: resumes polling with the SAME state ----
     loop {
-        match worker::run(&state, &provider, &config).await {
-            Ok(()) => break, // unreachable today
+        match worker::run(&state, &provider, &config, &mut last_block).await {
+            Ok(()) => continue, // unreachable today
             Err(e) => {
                 tracing::error!(error = %e, "worker exited — restarting in 5s");
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             }
         }
     }
-    Ok(())
 }

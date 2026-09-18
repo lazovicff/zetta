@@ -29,13 +29,10 @@ pub async fn run(
     state: &SharedState,
     provider: &impl Provider,
     config: &Config,
+    last_block: &mut u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // ---- initial chain sync, once ----
-    let mut last_block = catch_up(&state, &provider, &config).await?;
-    tracing::info!(stage = "catchup", last_block, "catch-up complete");
-
     loop {
-        last_block = indexer_step(state, provider, config, last_block).await?;
+        *last_block = indexer_step(state, provider, config, *last_block).await?;
         if let Some((z_0, witnesses)) = commit_leaves(state, provider, config).await? {
             do_update_root(state, provider, config, z_0, witnesses).await?;
         }
@@ -474,7 +471,7 @@ async fn do_withdraw(
     Ok(())
 }
 
-async fn catch_up(
+pub async fn catch_up(
     state: &SharedState,
     provider: &impl Provider,
     config: &Config,
