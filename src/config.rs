@@ -11,6 +11,10 @@ pub struct Config {
     pub port: u16,
     pub chain_id: u64,
     pub last_block: u64,
+    /// Card issuance fee in basis points (1/100 of a percent) of the prepaid amount.
+    pub card_fee_bps: u64,
+    /// Deposit fee in basis points, taken OUT of each withdrawn value.
+    pub deposit_fee_bps: u64,
 }
 
 impl Config {
@@ -28,6 +32,8 @@ impl Config {
             port: std::env::var("PORT")?.parse()?,
             chain_id,
             last_block: deployment_block(chain_id, "zERC20")?,
+            card_fee_bps: std::env::var("CARD_FEE_BPS")?.parse()?,
+            deposit_fee_bps: std::env::var("DEPOSIT_FEE_BPS")?.parse()?,
         })
     }
 }

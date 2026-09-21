@@ -71,7 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ---- worker retry loop: resumes polling with the SAME state ----
     loop {
-        match worker::run(&state, &provider, &config, &mut last_block).await {
+        match worker::run(&state, &provider, &config, &db, &mut last_block).await {
             Ok(()) => continue, // unreachable today
             Err(e) => {
                 tracing::error!(error = %e, "worker exited — restarting in 5s");

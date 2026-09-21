@@ -5,7 +5,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 
 use alloy::primitives::U256;
-use ark_bn254::{Fq, Fr};
+use ark_bn254::Fq;
 use ark_ec::{AffineRepr, CurveGroup, PrimeGroup};
 use ark_ff::{BigInteger, PrimeField};
 use ark_grumpkin::{Affine as G2Affine, Projective as G2};
@@ -13,7 +13,7 @@ use ark_grumpkin::{Affine as G2Affine, Projective as G2};
 use crate::burn::{recipient, trim_to_160};
 use crate::server::db::{Registration, fr_to_u256, unix_now};
 use crate::server::{AppState, parse_decimal_fq, parse_decimal_fr, parse_hex20};
-use crate::zkp::{poseidon2, poseidon3};
+use crate::zkp::poseidon3;
 
 pub fn spawn_http_server(app: AppState, listener: tokio::net::TcpListener) {
     tokio::spawn(async move {
@@ -24,10 +24,25 @@ pub fn spawn_http_server(app: AppState, listener: tokio::net::TcpListener) {
             .route("/deposits", get(deposits))
             .route("/balance/:pubkey_x", get(balance))
             .route("/cards", post(order_card))
+            .route("/next_card_nonce/:pubkey_x", get(next_card_nonce))
             .route("/status", get(status))
             .with_state(app);
         axum::serve(listener, router).await.unwrap();
     });
+}
+
+async fn next_card_nonce(
+    AxumState(app): AxumState<AppState>,
+    Path(pk): Path<String>,
+) -> impl IntoResponse {
+    let pk_x = match parse_decimal_fr(&pk) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    match app.db.next_card_nonce(pk_x).await {
+        Ok(n) => Json(serde_json::json!({ "nonce": n })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 // ---- HTTP handlers ----
@@ -157,9 +172,9 @@ async fn balance(AxumState(app): AxumState<AppState>, Path(pk): Path<String>) ->
 struct CardOrderReq {
     pubkey_x: String, // decimal
     amount: String,   // decimal token units
-    deadline: String, // decimal: order sig valid while burn_index <= deadline
     sig_r: (String, String),
     sig_z: String,
+    nonce: i64,
 }
 
 async fn order_card(
@@ -175,7 +190,6 @@ async fn order_card(
 async fn order_card_inner(app: &AppState, req: CardOrderReq) -> Result<serde_json::Value, String> {
     let pk_x = parse_decimal_fr(&req.pubkey_x)?;
     let amount = parse_decimal_fr(&req.amount)?;
-    let deadline = parse_decimal_fr(&req.deadline)?;
     let r = G2Affine::new_unchecked(
         parse_decimal_fr(&req.sig_r.0)?,
         parse_decimal_fr(&req.sig_r.1)?,
@@ -192,52 +206,42 @@ async fn order_card_inner(app: &AppState, req: CardOrderReq) -> Result<serde_jso
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "pubkey not registered".to_string())?;
 
-    // Ownership proof: z·G == R + e·P with e = poseidon3(R.x, P.x, poseidon2(amount, deadline)).
-    let pk = G2Affine::new_unchecked(reg.pubkey_x, reg.pubkey_y);
-    if !pk.is_on_curve() {
-        return Err("stored pubkey invalid".into());
-    }
-    let msg = poseidon2(amount, deadline).map_err(|e| e.to_string())?;
-    let e_fr = poseidon3(r.x, pk.x, msg).map_err(|e| e.to_string())?;
-    let e = Fq::from_be_bytes_mod_order(&e_fr.into_bigint().to_bytes_be());
-    if (G2::generator() * z).into_affine() != (G2::from(r) + G2::from(pk) * e).into_affine() {
-        return Err("bad order signature".into());
-    }
-
-    let (available, burn_index) = {
-        let s = app.state.lock().unwrap();
-        let mut total = U256::ZERO;
-        for (addr, sum) in &s.credits {
-            if s.pubkey_by_addr.get(addr).map(|p| p.into_affine().x) == Some(pk_x) {
-                total += *sum;
-            }
-        }
-        (total, s.chain.index())
-    };
-    if deadline < Fr::from(burn_index) {
-        return Err("order signature expired".into());
-    }
-    if deadline > Fr::from(burn_index + 1_000_000) {
-        return Err("deadline too far in the future".into());
-    }
+    let fee_bps = app.state.lock().unwrap().card_fee_bps;
+    let available = app
+        .db
+        .lifetime_deposited(pk_x)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let amount_u256 = fr_to_u256(amount);
+    let fee = amount_u256 * U256::from(fee_bps) / U256::from(10_000u64);
 
-    // 1. reserve funds (status 'pending') — Err means insufficient balance
+    // 1. verify sig + reserve funds atomically (status 'pending')
     let provider_ref = format!("stub-{amount_u256}-{}", unix_now());
     let new_spent = app
         .db
-        .try_spend(pk_x, amount_u256, available, "stub", &provider_ref)
+        .try_card_order(
+            &reg,
+            amount,
+            req.nonce,
+            fee,
+            available,
+            r,
+            z,
+            "stub",
+            &provider_ref,
+        )
         .await?;
 
     // 2. provider call — stub always succeeds; real provider goes here
     match Ok::<_, String>(()) {
         Ok(()) => {
             app.db
-                .settle_order(&provider_ref, "succeeded", None)
+                .settle_card_order(&provider_ref, "succeeded", None)
                 .await?;
             Ok(serde_json::json!({
                 "amount": amount_u256.to_string(),
+                "fee": fee.to_string(),
                 "provider": "stub",
                 "provider_ref": provider_ref,
                 "lifetime_spent": new_spent.to_string(),
@@ -246,7 +250,7 @@ async fn order_card_inner(app: &AppState, req: CardOrderReq) -> Result<serde_jso
         Err(e) => {
             let msg = e.to_string();
             app.db
-                .settle_order(&provider_ref, "failed", Some(&msg))
+                .settle_card_order(&provider_ref, "failed", Some(&msg))
                 .await?;
             Err(format!("card provider failed: {msg}"))
         }

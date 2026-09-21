@@ -1,14 +1,26 @@
-//! Durable append-only log: registrations + card orders (PostgreSQL).
-//! Tables are created externally. Deposits are NOT stored here —
-//! they are chain facts, rebuilt by replay.
-
-use alloy::primitives::U256;
-use ark_bn254::{Fq, Fr};
-use ark_ff::{BigInteger, PrimeField};
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{PgPool, Row};
+//! Durable append-only log: registrations + card orders + deposits + withdraws
+//! (PostgreSQL). Tables are created externally (src/schemas/*.sql).
+//!
+//! Accounting model (per pubkey_x):
+//!   available  = Σ(value − fee) over deposits          -- money in, neobank cut taken
+//!   reserved   = Σ over non-failed latest rows:
+//!                  card_orders: amount + fee           -- fee on TOP (prepaid, gone for good)
+//!                  withdraws:   amount                 -- fee comes OUT of amount
+//!   balance    = available − reserved
+//! 'closed' cards keep counting (the money is prepaid and unrecoverable);
+//! closing only stops the card from being the active one.
 
 use crate::ids::user_id;
+use crate::zkp::poseidon3;
+use alloy::primitives::U256;
+use ark_bn254::{Fq, Fr};
+use ark_ec::{CurveGroup, PrimeGroup};
+use ark_ff::{BigInteger, PrimeField};
+use ark_grumpkin::Affine as G2Affine;
+use ark_grumpkin::Projective as G2;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::{PgPool, Postgres, Row};
+use std::time::UNIX_EPOCH;
 
 pub fn fr_to_blob<F: PrimeField>(x: F) -> Vec<u8> {
     x.into_bigint().to_bytes_be()
@@ -28,13 +40,39 @@ pub fn blob_to_u256(b: &[u8]) -> U256 {
 
 pub fn unix_now() -> i64 {
     std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+        .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64
 }
 
-/// Global advisory-lock key serializing spends (replaces SQLite's BEGIN IMMEDIATE).
+/// Next per-user order nonce = user's order count. Runs on any executor
+/// (pool for the read endpoint, locked tx for the atomic insert).
+async fn card_nonce<'e, E>(exec: E, pubkey_x: Fr) -> Result<i64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    sqlx::query_scalar("SELECT COALESCE(MAX(nonce), -1) + 1 FROM card_orders WHERE pubkey_x = $1")
+        .bind(fr_to_blob(pubkey_x))
+        .fetch_one(exec)
+        .await
+}
+
+async fn withdraw_nonce<'e, E>(exec: E, pubkey_x: Fr) -> Result<i64, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    sqlx::query_scalar("SELECT COALESCE(MAX(nonce), -1) + 1 FROM withdraws WHERE pubkey_x = $1")
+        .bind(fr_to_blob(pubkey_x))
+        .fetch_one(exec)
+        .await
+}
+
+/// Global advisory-lock key serializing all reservations (cards + withdraws).
 const SPEND_LOCK_KEY: i64 = 0x5A45_5454_41; // "ZETTA"
+
+/// Domain tag bound into card-order signatures. Withdraws must use a
+/// different one so a card signature can never be replayed there.
+const CARD_ORDER_DOMAIN: u64 = 0x6361_7264; // "card"
 
 #[derive(Clone, Debug)]
 pub struct Registration {
@@ -48,6 +86,17 @@ pub struct Registration {
     pub salt: Fr,
     pub recipient: Fr,
     pub user_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct Deposit {
+    pub burn_address: [u8; 20],
+    pub pubkey_x: Fr,
+    pub value: U256, // gross amount withdrawn from the burn address
+    pub fee: U256,   // neobank's cut; credited is (value - fee)
+    pub tree_index: u64,
+    pub tx_hash: [u8; 32],
+    pub block_number: u64,
 }
 
 #[derive(Clone)]
@@ -72,6 +121,58 @@ fn row_to_registration(row: &sqlx::postgres::PgRow) -> Result<Registration, sqlx
     })
 }
 
+/// Σ reserved (non-failed latest rows): cards amount+fee, withdraws amount.
+async fn reserved<'e, E>(exec: E, pubkey_x: Fr) -> Result<U256, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    let mut total = U256::ZERO;
+
+    let card_rows = sqlx::query(
+        "SELECT DISTINCT ON (provider_ref) amount, fee, status
+         FROM card_orders
+         WHERE pubkey_x = $1
+         ORDER BY provider_ref, id DESC",
+    )
+    .bind(fr_to_blob(pubkey_x))
+    .fetch_all(exec)
+    .await?;
+    for r in &card_rows {
+        if r.try_get::<String, _>("status")? == "failed" {
+            continue; // failed releases; pending/succeeded/closed all count
+        }
+        let amount: Vec<u8> = r.try_get("amount")?;
+        let fee: Vec<u8> = r.try_get("fee")?;
+        total += blob_to_u256(&amount) + blob_to_u256(&fee);
+    }
+
+    Ok(total)
+}
+
+async fn reserved_withdraws<'e, E>(exec: E, pubkey_x: Fr) -> Result<U256, sqlx::Error>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    let mut total = U256::ZERO;
+    let rows = sqlx::query(
+        "SELECT DISTINCT ON (ref) amount, status
+         FROM withdraws
+         WHERE pubkey_x = $1
+         ORDER BY ref, id DESC",
+    )
+    .bind(fr_to_blob(pubkey_x))
+    .fetch_all(exec)
+    .await?;
+    for r in &rows {
+        if r.try_get::<String, _>("status")? == "failed" {
+            continue;
+        }
+        let amount: Vec<u8> = r.try_get("amount")?;
+        total += blob_to_u256(&amount);
+    }
+    Ok(total)
+}
+
 impl Db {
     pub async fn open(url: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let options: PgConnectOptions = url.parse()?;
@@ -80,6 +181,12 @@ impl Db {
             .await?;
         Ok(Self(pool))
     }
+
+    pub async fn next_card_nonce(&self, pubkey_x: Fr) -> Result<i64, Box<dyn std::error::Error>> {
+        Ok(card_nonce(&self.0, pubkey_x).await?)
+    }
+
+    // ---- registrations (unchanged) ----
 
     pub async fn insert_registration(
         &self,
@@ -142,40 +249,82 @@ impl Db {
             .map_err(Into::into)
     }
 
-    pub async fn total_spent(&self, pubkey_x: Fr) -> Result<U256, Box<dyn std::error::Error>> {
-        let rows = sqlx::query(
-            "SELECT DISTINCT ON (provider_ref) amount, status
-             FROM card_orders
-             WHERE pubkey_x = $1
-             ORDER BY provider_ref, id DESC",
+    // ---- deposits (money in) ----
+
+    /// Record a processed burn-address withdrawal as a user deposit.
+    /// Idempotent on tree_index (safe after crash/replay).
+    pub async fn insert_deposit(&self, d: &Deposit) -> Result<(), Box<dyn std::error::Error>> {
+        let value_bytes: [u8; 32] = d.value.to_be_bytes();
+        let fee_bytes: [u8; 32] = d.fee.to_be_bytes();
+        sqlx::query(
+            "INSERT INTO deposits (burn_address, pubkey_x, user_id, value, fee, tree_index, tx_hash, block_number, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             ON CONFLICT (tree_index) DO NOTHING",
         )
-        .bind(fr_to_blob(pubkey_x))
-        .fetch_all(&self.0)
+        .bind(d.burn_address.as_slice())
+        .bind(fr_to_blob(d.pubkey_x))
+        .bind(user_id(d.pubkey_x))
+        .bind(value_bytes.as_slice())
+        .bind(fee_bytes.as_slice())
+        .bind(d.tree_index as i64)
+        .bind(d.tx_hash.as_slice())
+        .bind(d.block_number as i64)
+        .bind(unix_now())
+        .execute(&self.0)
         .await?;
+        Ok(())
+    }
+
+    /// Σ(value − fee) over deposits — lifetime credited balance source.
+    pub async fn lifetime_deposited(
+        &self,
+        pubkey_x: Fr,
+    ) -> Result<U256, Box<dyn std::error::Error>> {
+        let rows = sqlx::query("SELECT value, fee FROM deposits WHERE pubkey_x = $1")
+            .bind(fr_to_blob(pubkey_x))
+            .fetch_all(&self.0)
+            .await?;
         let mut total = U256::ZERO;
         for r in &rows {
-            let status: String = r.try_get("status")?;
-            if status != "failed" {
-                let amount: Vec<u8> = r.try_get("amount")?;
-                total += blob_to_u256(&amount);
-            }
+            let value: Vec<u8> = r.try_get("value")?;
+            let fee: Vec<u8> = r.try_get("fee")?;
+            total += blob_to_u256(&value).saturating_sub(blob_to_u256(&fee));
         }
         Ok(total)
     }
 
-    /// Atomically check lifetime balance and record a spend.
-    /// `available` = lifetime deposits for this pubkey (chain-derived, passed in).
-    /// Returns the new lifetime spend total.
-    pub async fn try_spend(
+    // ---- spend accounting (cards + withdraws) ----
+
+    /// Total reserved across cards and withdraws — what /balance subtracts.
+    pub async fn total_spent(&self, pubkey_x: Fr) -> Result<U256, Box<dyn std::error::Error>> {
+        let cards = reserved(&self.0, pubkey_x).await?;
+        let wds = reserved_withdraws(&self.0, pubkey_x).await?;
+        Ok(cards + wds)
+    }
+
+    /// Atomically verify the order signature, check balance, and record the
+    /// order ('pending'). Signed message:
+    /// poseidon3(CARD_ORDER_DOMAIN, amount, nonce), nonce = user's order count
+    /// — this insert consumes it, so the signature is valid exactly once.
+    /// Verification happens inside the advisory lock: two requests bearing the
+    /// same signature cannot both pass.
+    pub async fn try_card_order(
         &self,
-        pubkey_x: Fr,
-        amount: U256,
+        reg: &Registration,
+        amount: Fr,
+        nonce: i64,
+        fee: U256,
         available: U256,
+        sig_r: G2Affine,
+        sig_z: Fq,
         provider: &str,
         provider_ref: &str,
     ) -> Result<U256, String> {
-        // A global advisory xact lock replaces SQLite's BEGIN IMMEDIATE: no two
-        // orders can pass the balance check concurrently.
+        let pk = G2Affine::new_unchecked(reg.pubkey_x, reg.pubkey_y);
+        if !pk.is_on_curve() {
+            return Err("stored pubkey invalid".into());
+        }
+
         let mut tx = self.0.begin().await.map_err(|e| e.to_string())?;
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(SPEND_LOCK_KEY)
@@ -183,62 +332,72 @@ impl Db {
             .await
             .map_err(|e| e.to_string())?;
 
-        let rows = sqlx::query(
-            "SELECT DISTINCT ON (provider_ref) amount, status
-             FROM card_orders
-             WHERE pubkey_x = $1
-             ORDER BY provider_ref, id DESC",
-        )
-        .bind(fr_to_blob(pubkey_x))
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
-
-        let mut spent = U256::ZERO;
-        for r in &rows {
-            let status: String = r.try_get("status").map_err(|e| e.to_string())?;
-            if status != "failed" {
-                let amount: Vec<u8> = r.try_get("amount").map_err(|e| e.to_string())?;
-                spent += blob_to_u256(&amount);
-            }
+        let expected = card_nonce(&mut *tx, reg.pubkey_x)
+            .await
+            .map_err(|e| e.to_string())?;
+        if nonce != expected {
+            return Err(format!("bad nonce: expected {expected}"));
         }
 
-        let new_spent = spent + amount;
+        // Schnorr: z·G == R + e·P over msg = poseidon3(DOMAIN, amount, nonce).
+        let msg = poseidon3(Fr::from(CARD_ORDER_DOMAIN), amount, Fr::from(nonce as u64))
+            .map_err(|e| e.to_string())?;
+        let e_fr = poseidon3(sig_r.x, pk.x, msg).map_err(|e| e.to_string())?;
+        let e = Fq::from_be_bytes_mod_order(&e_fr.into_bigint().to_bytes_be());
+        if (G2::generator() * sig_z).into_affine()
+            != (G2::from(sig_r) + G2::from(pk) * e).into_affine()
+        {
+            return Err("bad order signature".into());
+        }
+
+        let cards = reserved(&mut *tx, reg.pubkey_x)
+            .await
+            .map_err(|e| e.to_string())?;
+        let wds = reserved_withdraws(&mut *tx, reg.pubkey_x)
+            .await
+            .map_err(|e| e.to_string())?;
+        let spent = cards + wds;
+
+        let amount_u256 = fr_to_u256(amount);
+        let new_spent = spent + amount_u256 + fee;
         if new_spent > available {
             return Err(format!(
-                "insufficient balance: available {available}, spent {spent}, requested {amount}"
+                "insufficient balance: available {available}, spent {spent}, requested {amount_u256} + fee {fee}"
             ));
         }
 
-        let amount_bytes: [u8; 32] = amount.to_be_bytes();
+        let amount_bytes: [u8; 32] = amount_u256.to_be_bytes();
+        let fee_bytes: [u8; 32] = fee.to_be_bytes();
         sqlx::query(
-            "INSERT INTO card_orders (pubkey_x, user_id, amount, provider, provider_ref, status, created_at)
-             VALUES ($1, $2, $3, $4, $5, 'pending', $6)",
-        )
-        .bind(fr_to_blob(pubkey_x))
-        .bind(user_id(pubkey_x))
-        .bind(amount_bytes.as_slice())
-        .bind(provider)
-        .bind(provider_ref)
-        .bind(unix_now())
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
+                "INSERT INTO card_orders (pubkey_x, user_id, amount, fee, provider, provider_ref, status, nonce, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8)",
+            )
+            .bind(fr_to_blob(reg.pubkey_x))
+            .bind(user_id(reg.pubkey_x))
+            .bind(amount_bytes.as_slice())
+            .bind(fee_bytes.as_slice())
+            .bind(provider)
+            .bind(provider_ref)
+            .bind(nonce)
+            .bind(unix_now())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
 
         tx.commit().await.map_err(|e| e.to_string())?;
         Ok(new_spent)
     }
 
     /// Append a 'succeeded'/'failed' transition to an order still in 'pending'.
-    pub async fn settle_order(
+    pub async fn settle_card_order(
         &self,
         provider_ref: &str,
         status: &str,
         error: Option<&str>,
     ) -> Result<(), String> {
         let res = sqlx::query(
-            "INSERT INTO card_orders (pubkey_x, user_id, amount, provider, provider_ref, status, error, created_at, resolved_at)
-             SELECT pubkey_x, user_id, amount, provider, provider_ref, $1, $2, created_at, $3
+            "INSERT INTO card_orders (pubkey_x, user_id, amount, fee, provider, provider_ref, status, error, created_at, resolved_at)
+             SELECT pubkey_x, user_id, amount, fee, provider, provider_ref, $1, $2, created_at, $3
              FROM card_orders
              WHERE provider_ref = $4
                AND id = (SELECT MAX(id) FROM card_orders WHERE provider_ref = $4)
@@ -253,6 +412,127 @@ impl Db {
         .map_err(|e| e.to_string())?;
         if res.rows_affected() != 1 {
             return Err(format!("order {provider_ref} not pending (or missing)"));
+        }
+        Ok(())
+    }
+
+    /// Append a 'closed' transition to a succeeded order. No balance effect
+    /// (prepaid money is gone); the card just stops being the active one.
+    pub async fn close_card_order(&self, provider_ref: &str) -> Result<(), String> {
+        let res = sqlx::query(
+            "INSERT INTO card_orders (pubkey_x, user_id, amount, fee, provider, provider_ref, status, created_at, resolved_at)
+             SELECT pubkey_x, user_id, amount, fee, provider, provider_ref, 'closed', created_at, $1
+             FROM card_orders
+             WHERE provider_ref = $2
+               AND id = (SELECT MAX(id) FROM card_orders WHERE provider_ref = $2)
+               AND status = 'succeeded'",
+        )
+        .bind(unix_now())
+        .bind(provider_ref)
+        .execute(&self.0)
+        .await
+        .map_err(|e| e.to_string())?;
+        if res.rows_affected() != 1 {
+            return Err(format!("order {provider_ref} not succeeded (or missing)"));
+        }
+        Ok(())
+    }
+
+    // ---- withdraws (money out) ----
+
+    /// Atomically check balance and record a withdraw request ('pending').
+    /// Debited is `amount`; destination receives `amount - fee`.
+    /// `ref_` is caller-generated and must be unique.
+    pub async fn try_withdraw(
+        &self,
+        pubkey_x: Fr,
+        ref_: &str,
+        amount: U256,
+        fee: U256,
+        destination: [u8; 20],
+        available: U256,
+    ) -> Result<U256, String> {
+        if fee > amount {
+            return Err("fee exceeds amount".to_string());
+        }
+        let mut tx = self.0.begin().await.map_err(|e| e.to_string())?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(SPEND_LOCK_KEY)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let dup = sqlx::query("SELECT 1 FROM withdraws WHERE ref = $1")
+            .bind(ref_)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        if dup.is_some() {
+            return Err(format!("withdraw ref {ref_} already exists"));
+        }
+
+        let cards = reserved(&mut *tx, pubkey_x)
+            .await
+            .map_err(|e| e.to_string())?;
+        let wds = reserved_withdraws(&mut *tx, pubkey_x)
+            .await
+            .map_err(|e| e.to_string())?;
+        let spent = cards + wds;
+
+        let new_spent = spent + amount; // fee comes OUT of amount
+        if new_spent > available {
+            return Err(format!(
+                "insufficient balance: available {available}, spent {spent}, requested {amount}"
+            ));
+        }
+
+        let amount_bytes: [u8; 32] = amount.to_be_bytes();
+        let fee_bytes: [u8; 32] = fee.to_be_bytes();
+        sqlx::query(
+            "INSERT INTO withdraws (ref, pubkey_x, user_id, amount, fee, destination, status, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)",
+        )
+        .bind(ref_)
+        .bind(fr_to_blob(pubkey_x))
+        .bind(user_id(pubkey_x))
+        .bind(amount_bytes.as_slice())
+        .bind(fee_bytes.as_slice())
+        .bind(destination.as_slice())
+        .bind(unix_now())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        tx.commit().await.map_err(|e| e.to_string())?;
+        Ok(new_spent)
+    }
+
+    /// Append a 'succeeded'/'failed' transition to a request still in 'pending'.
+    pub async fn settle_withdraw(
+        &self,
+        ref_: &str,
+        status: &str,
+        tx_hash: Option<[u8; 32]>,
+        error: Option<&str>,
+    ) -> Result<(), String> {
+        let res = sqlx::query(
+            "INSERT INTO withdraws (ref, pubkey_x, user_id, amount, fee, destination, status, tx_hash, error, created_at, resolved_at)
+             SELECT ref, pubkey_x, user_id, amount, fee, destination, $1, $2, $3, created_at, $4
+             FROM withdraws
+             WHERE ref = $5
+               AND id = (SELECT MAX(id) FROM withdraws WHERE ref = $5)
+               AND status = 'pending'",
+        )
+        .bind(status)
+        .bind(tx_hash.map(|h| h.to_vec()))
+        .bind(error)
+        .bind(unix_now())
+        .bind(ref_)
+        .execute(&self.0)
+        .await
+        .map_err(|e| e.to_string())?;
+        if res.rows_affected() != 1 {
+            return Err(format!("withdraw {ref_} not pending (or missing)"));
         }
         Ok(())
     }
