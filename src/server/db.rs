@@ -102,17 +102,6 @@ pub struct Registration {
 }
 
 #[derive(Clone, Debug)]
-pub struct Deposit {
-    pub burn_address: [u8; 20],
-    pub pubkey_x: Fr,
-    pub value: U256, // gross amount withdrawn from the burn address
-    pub fee: U256,   // neobank's cut; credited is (value - fee)
-    pub tree_index: u64,
-    pub tx_hash: [u8; 32],
-    pub block_number: u64,
-}
-
-#[derive(Clone, Debug)]
 pub struct PendingWithdraw {
     pub ref_: String,
     pub amount: U256,
@@ -429,50 +418,6 @@ impl Db {
             .map(row_to_registration)
             .transpose()
             .map_err(Into::into)
-    }
-
-    // ---- deposits (money in) ----
-
-    /// Record a processed burn-address withdrawal as a user deposit.
-    /// Idempotent on tree_index (safe after crash/replay).
-    pub async fn insert_deposit(&self, d: &Deposit) -> Result<(), Box<dyn std::error::Error>> {
-        let value_bytes: [u8; 32] = d.value.to_be_bytes();
-        let fee_bytes: [u8; 32] = d.fee.to_be_bytes();
-        sqlx::query(
-            "INSERT INTO deposits (burn_address, pubkey_x, user_id, value, fee, tree_index, tx_hash, block_number, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-             ON CONFLICT (tree_index) DO NOTHING",
-        )
-        .bind(d.burn_address.as_slice())
-        .bind(fr_to_blob(d.pubkey_x))
-        .bind(user_id(d.pubkey_x))
-        .bind(value_bytes.as_slice())
-        .bind(fee_bytes.as_slice())
-        .bind(d.tree_index as i64)
-        .bind(d.tx_hash.as_slice())
-        .bind(d.block_number as i64)
-        .bind(unix_now())
-        .execute(&self.0)
-        .await?;
-        Ok(())
-    }
-
-    /// Σ(value − fee) over deposits — lifetime credited balance source.
-    pub async fn lifetime_deposited(
-        &self,
-        pubkey_x: Fr,
-    ) -> Result<U256, Box<dyn std::error::Error>> {
-        let rows = sqlx::query("SELECT value, fee FROM deposits WHERE pubkey_x = $1")
-            .bind(fr_to_blob(pubkey_x))
-            .fetch_all(&self.0)
-            .await?;
-        let mut total = U256::ZERO;
-        for r in &rows {
-            let value: Vec<u8> = r.try_get("value")?;
-            let fee: Vec<u8> = r.try_get("fee")?;
-            total += blob_to_u256(&value).saturating_sub(blob_to_u256(&fee));
-        }
-        Ok(total)
     }
 
     // ---- spend accounting (cards + withdraws) ----

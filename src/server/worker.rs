@@ -12,9 +12,8 @@ use tracing::{debug, info, warn};
 
 use crate::burn::{address_to_fr, recipient};
 use crate::config::Config;
-use crate::server::db::{Db, Deposit, fr_to_u256};
+use crate::server::db::{Db, fr_to_u256};
 use crate::server::state::State;
-// src/server/worker.rs
 use crate::server::{
     IToken, IVerifier, SharedState, Transfer, decode_opaque_proof, fq_to_u256, u256_to_fr,
 };
@@ -25,7 +24,6 @@ use crate::zkp::{
     prove_single_withdraw, prove_withdraw,
 };
 use crate::zkp::{poseidon2, prove_single_root_transition};
-use ark_ec::CurveGroup;
 
 pub async fn run(
     state: &SharedState,
@@ -39,7 +37,7 @@ pub async fn run(
         if let Some((z_0, witnesses)) = commit_leaves(state, provider, config).await? {
             do_update_root(state, provider, config, z_0, witnesses).await?;
         }
-        do_withdraw(state, provider, db, config).await?;
+        do_withdraw(state, provider, config).await?;
         do_payouts(provider, config, db).await?;
         debug!(stage = "idle", "sleeping {}s", config.poll_interval_secs);
         tokio::time::sleep(Duration::from_secs(config.poll_interval_secs)).await;
@@ -316,7 +314,6 @@ async fn do_update_root(
 async fn do_withdraw(
     state: &SharedState,
     provider: &impl Provider,
-    db: &Db,
     config: &Config,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Collect receipts for leaves already proven on-chain.
@@ -351,7 +348,7 @@ async fn do_withdraw(
     let recipient = recipient(chain_id, exchange_addr, tweak);
     let contract = IVerifier::new(config.verifier, provider);
 
-    let receipt = if receipts.len() == 1 {
+    if receipts.len() == 1 {
         let (_, idx, pubkey, sig_r, sig_z, salt, value) = receipts[0].clone();
         info!(
             stage = "withdraw",
@@ -415,7 +412,6 @@ async fn do_withdraw(
         })
         .await?;
         info!(stage = "withdraw", tx = %receipt.transaction_hash, gas = receipt.gas_used, "withdrawSingle confirmed");
-        receipt
     } else {
         info!(
             stage = "withdraw",
@@ -464,33 +460,7 @@ async fn do_withdraw(
         })
         .await?;
         info!(stage = "withdraw", tx = %receipt.transaction_hash, gas = receipt.gas_used, "withdraw confirmed");
-        receipt
     };
-
-    // Persist each consumed leaf as a user deposit; net credit = value - fee.
-    let tx_hash = receipt.transaction_hash.0;
-    let block_number = receipt
-        .block_number
-        .ok_or("confirmed receipt missing block number")?;
-    for (addr, idx, pubkey, _, _, _, value) in &receipts {
-        let value_u256 = fr_to_u256(*value);
-        let fee = value_u256 * U256::from(config.deposit_fee_bps) / U256::from(10_000u64);
-        db.insert_deposit(&Deposit {
-            burn_address: *addr,
-            pubkey_x: pubkey.into_affine().x,
-            value: value_u256,
-            fee,
-            tree_index: *idx as u64,
-            tx_hash,
-            block_number,
-        })
-        .await?;
-    }
-    info!(
-        stage = "withdraw",
-        rows = receipts.len(),
-        "deposits recorded"
-    );
 
     // Remove consumed deposits.
     let mut s = state.lock().unwrap();

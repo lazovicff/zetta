@@ -40,11 +40,15 @@ struct Args {
     rpc_url: String,
 
     /// Chain id, used to locate the deploy broadcast file (from .env `CHAIN_ID`).
-    #[arg(long, env = "CHAIN_ID")]
+    #[arg(long, env = "CHAIN_ID", default_value = "31337")]
     chain_id: u64,
 
     /// Private key holding deposit funds (from .env `CLIENT_PRIVATE_KEY`).
-    #[arg(long, env = "CLIENT_PRIVATE_KEY")]
+    #[arg(
+        long,
+        env = "CLIENT_PRIVATE_KEY",
+        default_value = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+    )]
     private_key: String,
 
     /// Number of signing keys to create.

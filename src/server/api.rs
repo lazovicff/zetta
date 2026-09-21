@@ -5,15 +5,27 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 
 use alloy::primitives::U256;
-use ark_bn254::Fq;
+use ark_bn254::{Fq, Fr};
 use ark_ec::{AffineRepr, CurveGroup, PrimeGroup};
 use ark_ff::{BigInteger, PrimeField};
 use ark_grumpkin::{Affine as G2Affine, Projective as G2};
 
 use crate::burn::{recipient, trim_to_160};
 use crate::server::db::{Registration, fr_to_u256, unix_now};
+use crate::server::state::State;
 use crate::server::{AppState, parse_decimal_fq, parse_decimal_fr, parse_hex20};
 use crate::zkp::poseidon3;
+
+/// Gross lifetime deposits for a pubkey (chain facts, replayed in-memory).
+fn available_deposits(s: &State, pk_x: Fr) -> U256 {
+    let mut total = U256::ZERO;
+    for (addr, sum) in &s.credits {
+        if s.pubkey_by_addr.get(addr).map(|p| p.into_affine().x) == Some(pk_x) {
+            total += *sum;
+        }
+    }
+    total
+}
 
 pub fn spawn_http_server(app: AppState, listener: tokio::net::TcpListener) {
     tokio::spawn(async move {
@@ -208,12 +220,10 @@ async fn order_card_inner(app: &AppState, req: CardOrderReq) -> Result<serde_jso
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "pubkey not registered".to_string())?;
 
-    let fee_bps = app.state.lock().unwrap().card_fee_bps;
-    let available = app
-        .db
-        .lifetime_deposited(pk_x)
-        .await
-        .map_err(|e| e.to_string())?;
+    let (available, fee_bps) = {
+        let s = app.state.lock().unwrap();
+        (available_deposits(&s, pk_x), s.card_fee_bps)
+    };
 
     let amount_u256 = fr_to_u256(amount);
     let fee = amount_u256 * U256::from(fee_bps) / U256::from(10_000u64);
@@ -314,12 +324,10 @@ async fn withdraw_inner(app: &AppState, req: WithdrawReq) -> Result<serde_json::
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "pubkey not registered".to_string())?;
 
-    let fee_bps = app.state.lock().unwrap().withdraw_fee_bps;
-    let available = app
-        .db
-        .lifetime_deposited(pk_x)
-        .await
-        .map_err(|e| e.to_string())?;
+    let (available, fee_bps) = {
+        let s = app.state.lock().unwrap();
+        (available_deposits(&s, pk_x), s.withdraw_fee_bps)
+    };
 
     let amount_u256 = fr_to_u256(amount);
     let fee = amount_u256 * U256::from(fee_bps) / U256::from(10_000u64);
