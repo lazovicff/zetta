@@ -1,4 +1,4 @@
-use alloy::providers::ProviderBuilder;
+use alloy::providers::{Provider, ProviderBuilder};
 use alloy::signers::local::PrivateKeySigner;
 use std::sync::{Arc, Mutex};
 use zetta::server::worker::catch_up;
@@ -60,6 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         AppState {
             state: state.clone(),
             db: db.clone(),
+            provider: provider.clone().erased(),
         },
         listener,
     );

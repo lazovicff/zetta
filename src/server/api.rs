@@ -25,6 +25,8 @@ pub fn spawn_http_server(app: AppState, listener: tokio::net::TcpListener) {
             .route("/balance/:pubkey_x", get(balance))
             .route("/cards", post(order_card))
             .route("/next_card_nonce/:pubkey_x", get(next_card_nonce))
+            .route("/withdraw", post(request_withdraw))
+            .route("/next_withdraw_nonce/:pubkey_x", get(next_withdraw_nonce))
             .route("/status", get(status))
             .with_state(app);
         axum::serve(listener, router).await.unwrap();
@@ -221,7 +223,8 @@ async fn order_card_inner(app: &AppState, req: CardOrderReq) -> Result<serde_jso
     let new_spent = app
         .db
         .try_card_order(
-            &reg,
+            reg.pubkey_x,
+            reg.pubkey_y,
             amount,
             req.nonce,
             fee,
@@ -255,6 +258,97 @@ async fn order_card_inner(app: &AppState, req: CardOrderReq) -> Result<serde_jso
             Err(format!("card provider failed: {msg}"))
         }
     }
+}
+
+#[derive(serde::Deserialize)]
+struct WithdrawReq {
+    pubkey_x: String,    // decimal
+    amount: String,      // decimal token units (debited; payout = amount - fee)
+    destination: String, // 0x + 40 hex
+    nonce: i64,          // per-user sequence; signs over it, single-use
+    sig_r: (String, String),
+    sig_z: String,
+}
+
+async fn next_withdraw_nonce(
+    AxumState(app): AxumState<AppState>,
+    Path(pk): Path<String>,
+) -> impl IntoResponse {
+    let pk_x = match parse_decimal_fr(&pk) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    match app.db.next_withdraw_nonce(pk_x).await {
+        Ok(n) => Json(serde_json::json!({ "nonce": n })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn request_withdraw(
+    AxumState(app): AxumState<AppState>,
+    Json(req): Json<WithdrawReq>,
+) -> impl IntoResponse {
+    match withdraw_inner(&app, req).await {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+async fn withdraw_inner(app: &AppState, req: WithdrawReq) -> Result<serde_json::Value, String> {
+    let pk_x = parse_decimal_fr(&req.pubkey_x)?;
+    let amount = parse_decimal_fr(&req.amount)?;
+    let destination = parse_hex20(&req.destination)?;
+    let r = G2Affine::new_unchecked(
+        parse_decimal_fr(&req.sig_r.0)?,
+        parse_decimal_fr(&req.sig_r.1)?,
+    );
+    if !r.is_on_curve() {
+        return Err("sig_r not on curve".into());
+    }
+    let z = parse_decimal_fq(&req.sig_z)?;
+
+    let reg = app
+        .db
+        .latest_registration_by_pubkey(pk_x)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "pubkey not registered".to_string())?;
+
+    let fee_bps = app.state.lock().unwrap().withdraw_fee_bps;
+    let available = app
+        .db
+        .lifetime_deposited(pk_x)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let amount_u256 = fr_to_u256(amount);
+    let fee = amount_u256 * U256::from(fee_bps) / U256::from(10_000u64);
+    let payout = amount_u256 - fee; // try_withdraw rejects fee > amount
+
+    // Verify sig + reserve atomically (status 'pending'); the worker pays out.
+    let ref_ = format!("wd-{amount_u256}-{}", unix_now());
+    app.db
+        .try_withdraw(
+            reg.pubkey_x,
+            reg.pubkey_y,
+            amount,
+            req.nonce,
+            fee,
+            available,
+            destination,
+            r,
+            z,
+            &ref_,
+        )
+        .await?;
+
+    Ok(serde_json::json!({
+        "ref": ref_,
+        "amount": amount_u256.to_string(),
+        "fee": fee.to_string(),
+        "payout": payout.to_string(),
+        "status": "pending",
+    }))
 }
 
 async fn status(AxumState(app): AxumState<AppState>) -> impl IntoResponse {

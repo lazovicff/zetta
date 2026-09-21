@@ -6,12 +6,17 @@ pub mod worker;
 use crate::server::db::Db;
 use crate::server::state::State;
 use alloy::primitives::U256;
+use alloy::providers::DynProvider;
 use alloy::sol;
 use ark_bn254::{Fq, Fr};
 use ark_ff::PrimeField;
 use std::sync::{Arc, Mutex};
 
 sol! {
+    #[sol(rpc)]
+    interface IToken {
+        function transfer(address to, uint256 value) external returns (bool);
+    }
     event Transfer(address indexed from, address indexed to, uint256 value);
 }
 
@@ -35,6 +40,7 @@ pub type SharedState = Arc<Mutex<State>>;
 pub struct AppState {
     pub state: SharedState,
     pub db: Db,
+    pub provider: DynProvider, // wallet-backed, signs with PRIVATE_KEY
 }
 
 fn u256_to_fr(v: U256) -> Fr {

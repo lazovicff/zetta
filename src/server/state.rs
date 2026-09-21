@@ -31,6 +31,8 @@ pub struct State {
     pub credits: HashMap<[u8; 20], U256>,
     /// Card issuance fee in basis points of `amount`.
     pub card_fee_bps: u64,
+    /// Withdraw fee in basis points, taken out of the requested amount.
+    pub withdraw_fee_bps: u64,
 }
 
 impl State {
@@ -53,6 +55,7 @@ impl State {
             deposits: HashMap::new(),
             credits: HashMap::new(),
             card_fee_bps: config.card_fee_bps,
+            withdraw_fee_bps: config.withdraw_fee_bps,
         })
     }
 }

@@ -10,7 +10,9 @@
 //! 'closed' cards keep counting (the money is prepaid and unrecoverable);
 //! closing only stops the card from being the active one.
 
+use crate::burn::address_to_fr;
 use crate::ids::user_id;
+use crate::zkp::poseidon2;
 use crate::zkp::poseidon3;
 use alloy::primitives::U256;
 use ark_bn254::{Fq, Fr};
@@ -45,6 +47,15 @@ pub fn unix_now() -> i64 {
         .as_secs() as i64
 }
 
+/// Schnorr over grumpkin: z·G == R + e·P with e = poseidon3(R.x, P.x, msg).
+/// Pubkey validity (on-curve, non-zero) is the caller's job.
+fn schnorr_verify(pubkey: G2Affine, msg: Fr, sig_r: G2Affine, sig_z: Fq) -> Result<bool, String> {
+    let e_fr = poseidon3(sig_r.x, pubkey.x, msg).map_err(|e| e.to_string())?;
+    let e = Fq::from_be_bytes_mod_order(&e_fr.into_bigint().to_bytes_be());
+    Ok((G2::generator() * sig_z).into_affine()
+        == (G2::from(sig_r) + G2::from(pubkey) * e).into_affine())
+}
+
 /// Next per-user order nonce = user's order count. Runs on any executor
 /// (pool for the read endpoint, locked tx for the atomic insert).
 async fn card_nonce<'e, E>(exec: E, pubkey_x: Fr) -> Result<i64, sqlx::Error>
@@ -73,6 +84,8 @@ const SPEND_LOCK_KEY: i64 = 0x5A45_5454_41; // "ZETTA"
 /// Domain tag bound into card-order signatures. Withdraws must use a
 /// different one so a card signature can never be replayed there.
 const CARD_ORDER_DOMAIN: u64 = 0x6361_7264; // "card"
+/// Domain tag for withdraw-request signatures (cards use CARD_ORDER_DOMAIN).
+const WITHDRAW_DOMAIN: u64 = 0x7769_7468; // "with"
 
 #[derive(Clone, Debug)]
 pub struct Registration {
@@ -97,6 +110,14 @@ pub struct Deposit {
     pub tree_index: u64,
     pub tx_hash: [u8; 32],
     pub block_number: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct PendingWithdraw {
+    pub ref_: String,
+    pub amount: U256,
+    pub fee: U256,
+    pub destination: [u8; 20],
 }
 
 #[derive(Clone)]
@@ -186,7 +207,168 @@ impl Db {
         Ok(card_nonce(&self.0, pubkey_x).await?)
     }
 
-    // ---- registrations (unchanged) ----
+    pub async fn next_withdraw_nonce(
+        &self,
+        pubkey_x: Fr,
+    ) -> Result<i64, Box<dyn std::error::Error>> {
+        Ok(withdraw_nonce(&self.0, pubkey_x).await?)
+    }
+
+    /// Atomically verify the request signature, check balance, and record the
+    /// withdraw ('pending'). Signed message:
+    /// poseidon3(WITHDRAW_DOMAIN, poseidon2(amount, destination_fr), nonce).
+    /// Debited is `amount`; destination receives `amount - fee`.
+    /// `nonce` is client-supplied; must equal the user's next nonce.
+    pub async fn try_withdraw(
+        &self,
+        pubkey_x: Fr,
+        pubkey_y: Fr,
+        amount: Fr,
+        nonce: i64,
+        fee: U256,
+        available: U256,
+        destination: [u8; 20],
+        sig_r: G2Affine,
+        sig_z: Fq,
+        ref_: &str,
+    ) -> Result<U256, String> {
+        let pk = G2Affine::new_unchecked(pubkey_x, pubkey_y);
+        if !pk.is_on_curve() {
+            return Err("stored pubkey invalid".into());
+        }
+        let amount_u256 = fr_to_u256(amount);
+        if fee > amount_u256 {
+            return Err("fee exceeds amount".into());
+        }
+
+        let mut tx = self.0.begin().await.map_err(|e| e.to_string())?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(SPEND_LOCK_KEY)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let dup = sqlx::query("SELECT 1 FROM withdraws WHERE ref = $1")
+            .bind(ref_)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        if dup.is_some() {
+            return Err(format!("withdraw ref {ref_} already exists"));
+        }
+
+        let expected = withdraw_nonce(&mut *tx, pubkey_x)
+            .await
+            .map_err(|e| e.to_string())?;
+        if nonce != expected {
+            return Err(format!("bad nonce: expected {expected}"));
+        }
+
+        // Schnorr over msg = poseidon3(WITHDRAW_DOMAIN, poseidon2(amount, dest_fr), nonce).
+        let inner = poseidon2(amount, address_to_fr(destination)).map_err(|e| e.to_string())?;
+        let msg = poseidon3(Fr::from(WITHDRAW_DOMAIN), inner, Fr::from(nonce as u64))
+            .map_err(|e| e.to_string())?;
+        if !schnorr_verify(pk, msg, sig_r, sig_z)? {
+            return Err("bad withdraw signature".into());
+        }
+
+        let cards = reserved(&mut *tx, pubkey_x)
+            .await
+            .map_err(|e| e.to_string())?;
+        let wds = reserved_withdraws(&mut *tx, pubkey_x)
+            .await
+            .map_err(|e| e.to_string())?;
+        let spent = cards + wds;
+
+        let new_spent = spent + amount_u256; // fee comes OUT of amount
+        if new_spent > available {
+            return Err(format!(
+                "insufficient balance: available {available}, spent {spent}, requested {amount_u256}"
+            ));
+        }
+
+        let amount_bytes: [u8; 32] = amount_u256.to_be_bytes();
+        let fee_bytes: [u8; 32] = fee.to_be_bytes();
+        sqlx::query(
+            "INSERT INTO withdraws (ref, pubkey_x, user_id, amount, fee, destination, status, nonce, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8)",
+        )
+        .bind(ref_)
+        .bind(fr_to_blob(pubkey_x))
+        .bind(user_id(pubkey_x))
+        .bind(amount_bytes.as_slice())
+        .bind(fee_bytes.as_slice())
+        .bind(destination.as_slice())
+        .bind(nonce)
+        .bind(unix_now())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        tx.commit().await.map_err(|e| e.to_string())?;
+        Ok(new_spent)
+    }
+
+    /// Append a 'succeeded'/'failed' transition to a request still in 'pending'.
+    /// Transition rows inherit the request's nonce (trigger exempts them).
+    pub async fn settle_withdraw(
+        &self,
+        ref_: &str,
+        status: &str,
+        tx_hash: Option<[u8; 32]>,
+        error: Option<&str>,
+    ) -> Result<(), String> {
+        let res = sqlx::query(
+            "INSERT INTO withdraws (ref, pubkey_x, user_id, amount, fee, destination, status, nonce, tx_hash, error, created_at, resolved_at)
+             SELECT ref, pubkey_x, user_id, amount, fee, destination, $1, nonce, $2, $3, created_at, $4
+             FROM withdraws
+             WHERE ref = $5
+               AND id = (SELECT MAX(id) FROM withdraws WHERE ref = $5)
+               AND status = 'pending'",
+        )
+        .bind(status)
+        .bind(tx_hash.map(|h| h.to_vec()))
+        .bind(error)
+        .bind(unix_now())
+        .bind(ref_)
+        .execute(&self.0)
+        .await
+        .map_err(|e| e.to_string())?;
+        if res.rows_affected() != 1 {
+            return Err(format!("withdraw {ref_} not pending (or missing)"));
+        }
+        Ok(())
+    }
+
+    /// Unsettled requests, FIFO. A 'pending' row with no later transition.
+    pub async fn pending_withdraws(
+        &self,
+    ) -> Result<Vec<PendingWithdraw>, Box<dyn std::error::Error>> {
+        let rows = sqlx::query(
+            "SELECT w.ref, w.amount, w.fee, w.destination
+             FROM withdraws w
+             WHERE w.status = 'pending'
+               AND NOT EXISTS (
+                   SELECT 1 FROM withdraws x WHERE x.ref = w.ref AND x.id > w.id
+               )
+             ORDER BY w.created_at ASC, w.id ASC",
+        )
+        .fetch_all(&self.0)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let dest: Vec<u8> = r.try_get("destination")?;
+            out.push(PendingWithdraw {
+                ref_: r.try_get("ref")?,
+                amount: blob_to_u256(&r.try_get::<Vec<u8>, _>("amount")?),
+                fee: blob_to_u256(&r.try_get::<Vec<u8>, _>("fee")?),
+                destination: dest
+                    .try_into()
+                    .map_err(|_| sqlx::Error::Decode("bad destination length".into()))?,
+            });
+        }
+        Ok(out)
+    }
 
     pub async fn insert_registration(
         &self,
@@ -310,7 +492,8 @@ impl Db {
     /// same signature cannot both pass.
     pub async fn try_card_order(
         &self,
-        reg: &Registration,
+        pubkey_x: Fr,
+        pubkey_y: Fr,
         amount: Fr,
         nonce: i64,
         fee: U256,
@@ -320,7 +503,7 @@ impl Db {
         provider: &str,
         provider_ref: &str,
     ) -> Result<U256, String> {
-        let pk = G2Affine::new_unchecked(reg.pubkey_x, reg.pubkey_y);
+        let pk = G2Affine::new_unchecked(pubkey_x, pubkey_y);
         if !pk.is_on_curve() {
             return Err("stored pubkey invalid".into());
         }
@@ -332,28 +515,24 @@ impl Db {
             .await
             .map_err(|e| e.to_string())?;
 
-        let expected = card_nonce(&mut *tx, reg.pubkey_x)
+        let expected = card_nonce(&mut *tx, pubkey_x)
             .await
             .map_err(|e| e.to_string())?;
         if nonce != expected {
             return Err(format!("bad nonce: expected {expected}"));
         }
 
-        // Schnorr: z·G == R + e·P over msg = poseidon3(DOMAIN, amount, nonce).
+        // Schnorr over msg = poseidon3(CARD_ORDER_DOMAIN, amount, nonce).
         let msg = poseidon3(Fr::from(CARD_ORDER_DOMAIN), amount, Fr::from(nonce as u64))
             .map_err(|e| e.to_string())?;
-        let e_fr = poseidon3(sig_r.x, pk.x, msg).map_err(|e| e.to_string())?;
-        let e = Fq::from_be_bytes_mod_order(&e_fr.into_bigint().to_bytes_be());
-        if (G2::generator() * sig_z).into_affine()
-            != (G2::from(sig_r) + G2::from(pk) * e).into_affine()
-        {
+        if !schnorr_verify(pk, msg, sig_r, sig_z)? {
             return Err("bad order signature".into());
         }
 
-        let cards = reserved(&mut *tx, reg.pubkey_x)
+        let cards = reserved(&mut *tx, pubkey_x)
             .await
             .map_err(|e| e.to_string())?;
-        let wds = reserved_withdraws(&mut *tx, reg.pubkey_x)
+        let wds = reserved_withdraws(&mut *tx, pubkey_x)
             .await
             .map_err(|e| e.to_string())?;
         let spent = cards + wds;
@@ -372,8 +551,8 @@ impl Db {
                 "INSERT INTO card_orders (pubkey_x, user_id, amount, fee, provider, provider_ref, status, nonce, created_at)
                  VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8)",
             )
-            .bind(fr_to_blob(reg.pubkey_x))
-            .bind(user_id(reg.pubkey_x))
+            .bind(fr_to_blob(pubkey_x))
+            .bind(user_id(pubkey_x))
             .bind(amount_bytes.as_slice())
             .bind(fee_bytes.as_slice())
             .bind(provider)
@@ -434,105 +613,6 @@ impl Db {
         .map_err(|e| e.to_string())?;
         if res.rows_affected() != 1 {
             return Err(format!("order {provider_ref} not succeeded (or missing)"));
-        }
-        Ok(())
-    }
-
-    // ---- withdraws (money out) ----
-
-    /// Atomically check balance and record a withdraw request ('pending').
-    /// Debited is `amount`; destination receives `amount - fee`.
-    /// `ref_` is caller-generated and must be unique.
-    pub async fn try_withdraw(
-        &self,
-        pubkey_x: Fr,
-        ref_: &str,
-        amount: U256,
-        fee: U256,
-        destination: [u8; 20],
-        available: U256,
-    ) -> Result<U256, String> {
-        if fee > amount {
-            return Err("fee exceeds amount".to_string());
-        }
-        let mut tx = self.0.begin().await.map_err(|e| e.to_string())?;
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(SPEND_LOCK_KEY)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let dup = sqlx::query("SELECT 1 FROM withdraws WHERE ref = $1")
-            .bind(ref_)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
-        if dup.is_some() {
-            return Err(format!("withdraw ref {ref_} already exists"));
-        }
-
-        let cards = reserved(&mut *tx, pubkey_x)
-            .await
-            .map_err(|e| e.to_string())?;
-        let wds = reserved_withdraws(&mut *tx, pubkey_x)
-            .await
-            .map_err(|e| e.to_string())?;
-        let spent = cards + wds;
-
-        let new_spent = spent + amount; // fee comes OUT of amount
-        if new_spent > available {
-            return Err(format!(
-                "insufficient balance: available {available}, spent {spent}, requested {amount}"
-            ));
-        }
-
-        let amount_bytes: [u8; 32] = amount.to_be_bytes();
-        let fee_bytes: [u8; 32] = fee.to_be_bytes();
-        sqlx::query(
-            "INSERT INTO withdraws (ref, pubkey_x, user_id, amount, fee, destination, status, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)",
-        )
-        .bind(ref_)
-        .bind(fr_to_blob(pubkey_x))
-        .bind(user_id(pubkey_x))
-        .bind(amount_bytes.as_slice())
-        .bind(fee_bytes.as_slice())
-        .bind(destination.as_slice())
-        .bind(unix_now())
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
-
-        tx.commit().await.map_err(|e| e.to_string())?;
-        Ok(new_spent)
-    }
-
-    /// Append a 'succeeded'/'failed' transition to a request still in 'pending'.
-    pub async fn settle_withdraw(
-        &self,
-        ref_: &str,
-        status: &str,
-        tx_hash: Option<[u8; 32]>,
-        error: Option<&str>,
-    ) -> Result<(), String> {
-        let res = sqlx::query(
-            "INSERT INTO withdraws (ref, pubkey_x, user_id, amount, fee, destination, status, tx_hash, error, created_at, resolved_at)
-             SELECT ref, pubkey_x, user_id, amount, fee, destination, $1, $2, $3, created_at, $4
-             FROM withdraws
-             WHERE ref = $5
-               AND id = (SELECT MAX(id) FROM withdraws WHERE ref = $5)
-               AND status = 'pending'",
-        )
-        .bind(status)
-        .bind(tx_hash.map(|h| h.to_vec()))
-        .bind(error)
-        .bind(unix_now())
-        .bind(ref_)
-        .execute(&self.0)
-        .await
-        .map_err(|e| e.to_string())?;
-        if res.rows_affected() != 1 {
-            return Err(format!("withdraw {ref_} not pending (or missing)"));
         }
         Ok(())
     }

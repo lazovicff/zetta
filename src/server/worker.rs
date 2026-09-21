@@ -14,8 +14,9 @@ use crate::burn::{address_to_fr, recipient};
 use crate::config::Config;
 use crate::server::db::{Db, Deposit, fr_to_u256};
 use crate::server::state::State;
+// src/server/worker.rs
 use crate::server::{
-    IVerifier, SharedState, Transfer, decode_opaque_proof, fq_to_u256, u256_to_fr,
+    IToken, IVerifier, SharedState, Transfer, decode_opaque_proof, fq_to_u256, u256_to_fr,
 };
 use crate::tree::TREE_DEPTH;
 use crate::zkp::{
@@ -39,12 +40,13 @@ pub async fn run(
             do_update_root(state, provider, config, z_0, witnesses).await?;
         }
         do_withdraw(state, provider, db, config).await?;
+        do_payouts(provider, config, db).await?;
         debug!(stage = "idle", "sleeping {}s", config.poll_interval_secs);
         tokio::time::sleep(Duration::from_secs(config.poll_interval_secs)).await;
     }
 }
 
-async fn send_and_confirm<F, Fut, E>(
+pub async fn send_and_confirm<F, Fut, E>(
     send: F,
 ) -> Result<alloy::rpc::types::TransactionReceipt, Box<dyn std::error::Error>>
 where
@@ -498,6 +500,60 @@ async fn do_withdraw(
         }
     }
     s.deposits.retain(|_, ds| !ds.is_empty());
+    Ok(())
+}
+
+/// Pay out pending user withdraws, one by one. All exchange txs come from
+/// this same key, so this must stay sequential within the worker loop.
+async fn do_payouts(
+    provider: &impl Provider,
+    config: &Config,
+    db: &Db,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let pendings = db.pending_withdraws().await?;
+    if pendings.is_empty() {
+        return Ok(());
+    }
+    info!(
+        stage = "payout",
+        count = pendings.len(),
+        "processing pending withdraws"
+    );
+    let contract = IToken::new(config.token, provider);
+
+    for w in pendings {
+        let payout = w.amount.saturating_sub(w.fee);
+        let ref_ = w.ref_.clone();
+        let res = send_and_confirm(|| {
+            let contract = contract.clone();
+            async move {
+                contract
+                    .transfer(Address::from(w.destination), payout)
+                    .send()
+                    .await
+            }
+        })
+        .await;
+        match res {
+            Ok(rc) if rc.status() => {
+                db.settle_withdraw(&ref_, "succeeded", Some(rc.transaction_hash.0), None)
+                    .await?;
+                info!(stage = "payout", ref_ = %ref_, tx = %rc.transaction_hash, "withdraw paid out");
+            }
+            Ok(_) => {
+                db.settle_withdraw(&ref_, "failed", None, Some("payout reverted"))
+                    .await?;
+                warn!(stage = "payout", ref_ = %ref_, "payout reverted");
+            }
+            Err(e) => {
+                // Unknown fate: the tx may have been broadcast before the
+                // error. Do NOT settle 'failed' (that would free the
+                // reservation while tokens may have moved) — leave 'pending'
+                // for the operator to resolve.
+                warn!(stage = "payout", ref_ = %ref_, error = %e, "payout outcome unknown — left pending");
+            }
+        }
+    }
     Ok(())
 }
 
