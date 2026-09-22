@@ -366,8 +366,8 @@ impl Db {
         r: &Registration,
     ) -> Result<(), Box<dyn std::error::Error>> {
         sqlx::query(
-            "INSERT INTO registrations (burn_address, created_at, pubkey_x, pubkey_y, sig_r_x, sig_r_y, sig_z, salt, recipient, user_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            "INSERT INTO registrations (burn_address, created_at, pubkey_x, pubkey_y, sig_r_x, sig_r_y, sig_z, salt, recipient, user_id, registered_from)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         )
         .bind(r.address.as_slice())
         .bind(r.created_at)
@@ -379,6 +379,7 @@ impl Db {
         .bind(fr_to_blob(r.salt))
         .bind(fr_to_blob(r.recipient))
         .bind(&r.user_id)
+        .bind(r.registered_from)
         .execute(&self.0)
         .await?;
         Ok(())
