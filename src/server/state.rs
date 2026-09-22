@@ -34,6 +34,9 @@ pub struct State {
     pub card_fee_bps: u64,
     /// Withdraw fee in basis points, taken out of the requested amount.
     pub withdraw_fee_bps: u64,
+    /// Registration boundary per burn address: deposits at tree index >= this
+    /// are claimable; earlier transfers to the address are treated as burned.
+    pub registered_from: HashMap<[u8; 20], u64>,
 }
 
 impl State {
@@ -57,6 +60,7 @@ impl State {
             credits: HashMap::new(),
             card_fee_bps: config.card_fee_bps,
             withdraw_fee_bps: config.withdraw_fee_bps,
+            registered_from: HashMap::new(),
         })
     }
 }

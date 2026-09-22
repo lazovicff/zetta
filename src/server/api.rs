@@ -16,12 +16,22 @@ use crate::server::state::State;
 use crate::server::{AppState, parse_decimal_fq, parse_decimal_fr, parse_hex20};
 use crate::zkp::poseidon3;
 
-/// Gross lifetime deposits for a pubkey (chain facts, replayed in-memory).
+/// Claimable proven deposits for a pubkey: only deposits to addresses
+/// registered under it, at indices at/after their registration boundary.
 fn available_deposits(s: &State, pk_x: Fr) -> U256 {
     let mut total = U256::ZERO;
-    for (addr, sum) in &s.credits {
-        if s.pubkey_by_addr.get(addr).map(|p| p.into_affine().x) == Some(pk_x) {
-            total += *sum;
+    for (addr, ds) in &s.deposits {
+        let Some(pk) = s.pubkey_by_addr.get(addr) else {
+            continue;
+        };
+        if pk.into_affine().x != pk_x {
+            continue;
+        }
+        let from = s.registered_from.get(addr).copied().unwrap_or(u64::MAX);
+        for &(value, idx) in ds {
+            if idx as u64 >= from {
+                total += fr_to_u256(value);
+            }
         }
     }
     total
@@ -111,9 +121,12 @@ async fn register_inner(app: &AppState, req: RegisterReq) -> Result<(), String> 
     let z = parse_decimal_fq(&req.sig_z)?;
     let salt = parse_decimal_fr(&req.salt)?;
 
-    let recipient = {
+    let (recipient, registered_from) = {
         let s = app.state.lock().unwrap();
-        recipient(s.chain_id, s.exchange_addr, s.tweak)
+        (
+            recipient(s.chain_id, s.exchange_addr, s.tweak),
+            s.chain.index(),
+        )
     };
 
     // Address must be derivable from (pubkey, salt) under the current recipient.
@@ -141,6 +154,7 @@ async fn register_inner(app: &AppState, req: RegisterReq) -> Result<(), String> 
         sig_z: z,
         salt,
         recipient,
+        registered_from: registered_from as i64,
         user_id: crate::ids::user_id(pk.x),
     };
     app.db
@@ -152,6 +166,11 @@ async fn register_inner(app: &AppState, req: RegisterReq) -> Result<(), String> 
     s.pubkey_by_addr.insert(addr, G2::from(pk));
     s.sig_by_addr.insert(addr, (G2::from(r), z));
     s.salt_by_addr.insert(addr, salt);
+    s.registered_from
+        .entry(addr)
+        .and_modify(|f| *f = (*f).min(registered_from))
+        .or_insert(registered_from);
+
     Ok(())
 }
 

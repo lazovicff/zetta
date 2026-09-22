@@ -27,7 +27,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     zetta::zkp::cached_single_root_params()?;
     zetta::zkp::cached_single_withdraw_params()?;
     tracing::info!(stage = "boot", elapsed = ?t.elapsed(), "proving params loaded");
-    // (if you haven't applied the param refactor, use root_params()/withdraw_params()/… here)
 
     let signer: PrivateKeySigner = config.private_key.parse()?;
     let exchange_addr = signer.address().into_array();
@@ -63,5 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     tracing::info!(stage = "boot", port = config.port, "HTTP server bound");
 
-    Ok(())
+    // Worker loop: per interval — prepare (catch up to proven state) →
+    // reserve → process (updateRoot + withdraws); payouts run isolated.
+    worker::run(&state, &provider, &config, &db).await
 }

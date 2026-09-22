@@ -98,6 +98,7 @@ pub struct Registration {
     pub sig_z: Fq,
     pub salt: Fr,
     pub recipient: Fr,
+    pub registered_from: i64,
     pub user_id: String,
 }
 
@@ -127,6 +128,7 @@ fn row_to_registration(row: &sqlx::postgres::PgRow) -> Result<Registration, sqlx
         sig_z: blob_to_fr(&row.try_get::<Vec<u8>, _>("sig_z")?),
         salt: blob_to_fr(&row.try_get::<Vec<u8>, _>("salt")?),
         recipient: blob_to_fr(&row.try_get::<Vec<u8>, _>("recipient")?),
+        registered_from: row.try_get("registered_from")?,
         user_id: row.try_get("user_id")?,
     })
 }
@@ -387,11 +389,12 @@ impl Db {
         &self,
     ) -> Result<Vec<Registration>, Box<dyn std::error::Error>> {
         let rows = sqlx::query(
-            "SELECT burn_address, created_at, pubkey_x, pubkey_y, sig_r_x, sig_r_y, sig_z, salt, recipient, user_id
-             FROM registrations r
-             WHERE created_at = (
-                 SELECT MAX(created_at) FROM registrations WHERE burn_address = r.burn_address
-             )",
+            "SELECT burn_address, created_at, pubkey_x, pubkey_y, sig_r_x, sig_r_y, sig_z, salt, recipient, user_id,
+                (SELECT MIN(registered_from) FROM registrations x WHERE x.burn_address = r.burn_address) AS registered_from
+            FROM registrations r
+            WHERE created_at = (
+                SELECT MAX(created_at) FROM registrations WHERE burn_address = r.burn_address
+            )",
         )
         .fetch_all(&self.0)
         .await?;
@@ -407,7 +410,8 @@ impl Db {
         pubkey_x: Fr,
     ) -> Result<Option<Registration>, Box<dyn std::error::Error>> {
         let row = sqlx::query(
-            "SELECT burn_address, created_at, pubkey_x, pubkey_y, sig_r_x, sig_r_y, sig_z, salt, recipient, user_id
+            "SELECT burn_address, created_at, pubkey_x, pubkey_y, sig_r_x, sig_r_y, sig_z, salt, recipient, user_id,
+                (SELECT MIN(registered_from) FROM registrations x WHERE x.burn_address = r.burn_address) AS registered_from
              FROM registrations
              WHERE pubkey_x = $1 ORDER BY created_at DESC LIMIT 1",
         )

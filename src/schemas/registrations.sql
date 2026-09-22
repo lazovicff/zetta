@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS registrations (
     sig_z        bytea   NOT NULL CHECK (octet_length(sig_z) = 32),
     salt         bytea   NOT NULL CHECK (octet_length(salt) = 32),
     recipient    bytea   NOT NULL CHECK (octet_length(recipient) = 32),
+    registered_from bigint NOT NULL CHECK (registered_from >= 0),  -- claimable from this transfer index; earlier deposits are burned
     user_id      text    NOT NULL,
     PRIMARY KEY (burn_address, created_at)
 );
