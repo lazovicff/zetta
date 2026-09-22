@@ -63,7 +63,7 @@ export interface CardOrderResult {
 export async function orderCard(req: {
   pubkeyX: bigint;
   amount: bigint; // wei
-  deadline: bigint; // global burn index; sig valid while index <= deadline
+  nonce: number;  // per-user order nonce from /next_card_nonce
   sigR: { x: bigint; y: bigint };
   sigZ: bigint;
 }): Promise<CardOrderResult> {
@@ -74,7 +74,7 @@ export async function orderCard(req: {
     body: JSON.stringify({
       pubkey_x: req.pubkeyX.toString(10),
       amount: req.amount.toString(10),
-      deadline: req.deadline.toString(10),
+      nonce: req.nonce,
       sig_r: [req.sigR.x.toString(10), req.sigR.y.toString(10)],
       sig_z: req.sigZ.toString(10),
     }),
@@ -82,6 +82,16 @@ export async function orderCard(req: {
   if (!res.ok) throw new Error(await res.text()); // server returns plain-text errors
   return (await res.json()) as CardOrderResult;
 }
+
+
+export async function getNextCardNonce(pubkeyX: bigint): Promise<number> {
+  if (!SERVER_URL) throw new Error('EXPO_PUBLIC_SERVER_URL is not set — check mobile/.env');
+  const res = await fetch(`${SERVER_URL}/next_card_nonce/${pubkeyX.toString(10)}`);
+  if (!res.ok) throw new Error(`GET /next_card_nonce failed: ${res.status}`);
+  const { nonce } = (await res.json()) as { nonce: number };
+  return nonce;
+}
+
 
 /** Register a burn address + Schnorr ownership proof (server: register_inner).
  *  Deposits to unregistered addresses are NOT credited by the server. */

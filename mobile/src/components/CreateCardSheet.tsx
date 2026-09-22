@@ -9,11 +9,10 @@ import {
   View,
 } from 'react-native';
 
-import { getBalance, getStatus, orderCard } from '../api';
+import { getBalance, getNextCardNonce, orderCard } from '../api';
 import { pubkey, schnorrSignOrder } from '../crypto';
 import { parseUsd } from '../format';
 import { addCard, getOrCreateIdentitySecret } from '../storage';
-import type { BurnEntry } from '../types';
 
 /** Placeholder PAN — the 'stub' provider returns no card number yet. */
 function stubCardNumber(): string {
@@ -70,16 +69,16 @@ export function CreateCardSheet({
         throw new Error('Insufficient balance — top up first');
       }
 
-      const { index } = await getStatus();
-      const deadline = BigInt(index) + 1_000_000n; // server cap: index + 1_000_000
-      const sig = schnorrSignOrder(secret, amountWei, deadline);
+      const nonce = await getNextCardNonce(pubkeyX);
+      const sig = schnorrSignOrder(secret, amountWei, BigInt(nonce));
       const res = await orderCard({
         pubkeyX,
         amount: amountWei,
-        deadline,
+        nonce,
         sigR: sig.sigR,
         sigZ: sig.sigZ,
       });
+
 
       const now = Date.now();
       await addCard({

@@ -413,7 +413,7 @@ impl Db {
         let row = sqlx::query(
             "SELECT burn_address, created_at, pubkey_x, pubkey_y, sig_r_x, sig_r_y, sig_z, salt, recipient, user_id,
                 (SELECT MIN(registered_from) FROM registrations x WHERE x.burn_address = r.burn_address) AS registered_from
-             FROM registrations
+             FROM registrations r
              WHERE pubkey_x = $1 ORDER BY created_at DESC LIMIT 1",
         )
         .bind(fr_to_blob(pubkey_x))
@@ -545,12 +545,12 @@ impl Db {
         error: Option<&str>,
     ) -> Result<(), String> {
         let res = sqlx::query(
-            "INSERT INTO card_orders (pubkey_x, user_id, amount, fee, provider, provider_ref, status, error, created_at, resolved_at)
-             SELECT pubkey_x, user_id, amount, fee, provider, provider_ref, $1, $2, created_at, $3
-             FROM card_orders
-             WHERE provider_ref = $4
-               AND id = (SELECT MAX(id) FROM card_orders WHERE provider_ref = $4)
-               AND status = 'pending'",
+            "INSERT INTO card_orders (pubkey_x, user_id, amount, fee, provider, provider_ref, status, error, nonce, created_at, resolved_at)
+            SELECT pubkey_x, user_id, amount, fee, provider, provider_ref, $1, $2, nonce, created_at, $3
+            FROM card_orders
+            WHERE provider_ref = $4
+              AND id = (SELECT MAX(id) FROM card_orders WHERE provider_ref = $4)
+              AND status = 'pending'",
         )
         .bind(status)
         .bind(error)
@@ -569,8 +569,8 @@ impl Db {
     /// (prepaid money is gone); the card just stops being the active one.
     pub async fn close_card_order(&self, provider_ref: &str) -> Result<(), String> {
         let res = sqlx::query(
-            "INSERT INTO card_orders (pubkey_x, user_id, amount, fee, provider, provider_ref, status, created_at, resolved_at)
-             SELECT pubkey_x, user_id, amount, fee, provider, provider_ref, 'closed', created_at, $1
+            "INSERT INTO card_orders (pubkey_x, user_id, amount, fee, provider, provider_ref, status, nonce, created_at, resolved_at)
+            SELECT pubkey_x, user_id, amount, fee, provider, provider_ref, 'closed', nonce, created_at, $1
              FROM card_orders
              WHERE provider_ref = $2
                AND id = (SELECT MAX(id) FROM card_orders WHERE provider_ref = $2)

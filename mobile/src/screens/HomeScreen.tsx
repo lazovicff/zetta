@@ -32,10 +32,12 @@ export function HomeScreen() {
         setBalanceWei(null);
       }
       try {
-        deposits = await getDeposits(pkX); // server truth; gone after a chain reset
-      } catch {
-        /* offline — no deposit rows this render */
+        deposits = await getDeposits(pkX);
+        console.warn('deposits', JSON.stringify(deposits));
+      } catch (e) {
+        console.warn('getDeposits failed', e);
       }
+
     } else {
       setBalanceWei(0n);
     }
@@ -50,7 +52,7 @@ export function HomeScreen() {
           id: `dep-${d.address}-${d.tree_index}`,
           kind: 'withdrawal' as const,
           title: 'Top up',
-          subtitle: `${d.address}`,
+          subtitle: `${d.address.slice(0, 7)}…${d.address.slice(-5)}`,
           amountWei: BigInt(d.value),
           at: d.tree_index,
         })),

@@ -43,7 +43,7 @@ pub fn spawn_http_server(app: AppState, listener: tokio::net::TcpListener) {
             .route("/health", get(health))
             .route("/recipient", get(current_recipient))
             .route("/register", post(register))
-            .route("/deposits", get(deposits))
+            .route("/deposits/:pubkey_x", get(deposits))
             .route("/deposits-by-user-id/:user_id", get(deposits_by_user_id))
             .route("/balance/:pubkey_x", get(balance))
             .route("/cards", post(order_card))

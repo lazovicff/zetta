@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS card_orders (
     resolved_at  bigint                   -- this transition's time (NULL for pending)
 );
 
-CREATE UNIQUE INDEX uniq_card_orders_nonce ON card_orders(pubkey_x, nonce);
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_card_orders_nonce
+    ON card_orders(pubkey_x, nonce) WHERE status = 'pending';
 CREATE INDEX idx_card_orders_pubkey ON card_orders(pubkey_x);
 CREATE INDEX idx_card_orders_user_id ON card_orders(user_id);
 CREATE INDEX idx_card_orders_ref ON card_orders(provider_ref, id DESC);

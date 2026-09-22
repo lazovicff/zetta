@@ -21,10 +21,11 @@ CREATE TABLE IF NOT EXISTS withdraws (
     resolved_at bigint                           -- this transition's time (NULL for pending)
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_withdraws_nonce
+    ON withdraws(pubkey_x, nonce) WHERE status = 'pending';
 CREATE INDEX idx_withdraws_pubkey ON withdraws(pubkey_x);
 CREATE INDEX idx_withdraws_user_id ON withdraws(user_id);
 CREATE INDEX idx_withdraws_ref ON withdraws(ref, id DESC);
-CREATE UNIQUE INDEX uniq_withdraws_nonce ON withdraws(pubkey_x, nonce);
 
 -- Per-user nonce sequence: 'pending' inserts must be exactly max(nonce)+1.
 CREATE OR REPLACE FUNCTION enforce_next_nonce() RETURNS trigger AS $$
