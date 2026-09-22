@@ -7,6 +7,7 @@ use ark_grumpkin::Projective as G2;
 use crate::config::Config;
 use crate::tree::{HashChain, MerkleTree, TREE_DEPTH};
 
+#[derive(Clone)]
 pub struct State {
     /// Single depth-32 ever-growing tree.
     pub tree: MerkleTree,

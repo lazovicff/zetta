@@ -10,6 +10,7 @@ pub const TREE_DEPTH: usize = 32;
 /// Append-only Poseidon binary Merkle tree with all levels materialized.
 /// levels[0] = leaves … levels[depth] = [root]. Proof queries are O(depth),
 /// at the cost of 2^(depth+1)-1 stored nodes when full.
+#[derive(Clone)]
 pub struct MerkleTree {
     depth: usize,
     levels: Vec<Vec<Fr>>, // levels[h].len() == ceil(leaves / 2^h)
@@ -105,7 +106,7 @@ pub fn hash_chain_step(prev: Fr, to: [u8; 20], value: Fr) -> Fr {
 }
 
 /// Off-chain mirror of the on-chain `burnHashChain`.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct HashChain {
     state: Fr,
     index: u64,
