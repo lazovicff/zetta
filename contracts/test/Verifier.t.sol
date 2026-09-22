@@ -46,7 +46,7 @@ contract MockSingleWithdrawVerifier is ISingleWithdrawVerifier {
         uint256[2] calldata,
         uint256[2][2] calldata,
         uint256[2] calldata,
-        uint256[3] calldata
+        uint256[4] calldata
     ) external view returns (bool) {
         return result;
     }

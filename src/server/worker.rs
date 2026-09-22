@@ -435,9 +435,10 @@ async fn submit_single_withdraw(
     let value = circuit.witness.value;
     let (proof, _) = prove_single_withdraw(circuit)?;
     let (a, b, c) = pack_groth16(&proof);
-    let signals: [U256; 3] = [
+    let signals: [U256; 4] = [
         fr_to_u256(work.tree.root()),
         fr_to_u256(recip),
+        U256::ZERO, // index_with_offset = 0 (single-shot fold)
         fr_to_u256(value),
     ];
     let verifier = IVerifier::new(config.verifier, provider);

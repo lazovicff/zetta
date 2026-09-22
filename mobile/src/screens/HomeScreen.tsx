@@ -9,10 +9,10 @@ import {
 } from 'react-native';
 
 import { pubkey } from '../crypto';
-import { getBalance, getDeposits } from '../api';
+import { getBalance, getDeposits, RemoteDeposit } from '../api';
 import { TopUpSheet } from '../components/TopUpSheet';
 import { formatUsd } from '../format';
-import { listCards, listDepositRecords, listEntries, recordDeposits, getIdentitySecret } from '../storage';
+import { listCards, getIdentitySecret } from '../storage';
 import type { HistoryItem } from '../types';
 
 export function HomeScreen() {
@@ -22,46 +22,51 @@ export function HomeScreen() {
   const [topUpOpen, setTopUpOpen] = useState(false);
 
   const reload = useCallback(async () => {
-    const entries = await listEntries();
-    // single identity key: server aggregates across every registered burn address
     const secret = await getIdentitySecret();
-    try {
-      setBalanceWei(secret == null ? 0n : await getBalance(pubkey(secret).x));
-    } catch {
-      setBalanceWei(null);
-    }
-
-    // deposits: server is the source of truth; we stamp firstSeenAt locally,
-    // cards: fully local — merge, newest first
-    const owned = new Set(entries.map((e) => e.address.toLowerCase()));
-    let deposits = await listDepositRecords();
-    try {
-      deposits = await recordDeposits(owned, await getDeposits());
-    } catch {
-      /* offline — keep last-known history */
+    let deposits: RemoteDeposit[] = [];
+    if (secret != null) {
+      const pkX = pubkey(secret).x;
+      try {
+        setBalanceWei(await getBalance(pkX));
+      } catch {
+        setBalanceWei(null);
+      }
+      try {
+        deposits = await getDeposits(pkX); // server truth; gone after a chain reset
+      } catch {
+        /* offline — no deposit rows this render */
+      }
+    } else {
+      setBalanceWei(0n);
     }
     const cards = await listCards();
 
+    // deposits first (newest leaf first), then cards (newest first) — deposits
+    // carry no timestamp, so there's no common time axis with cards.
     const items: HistoryItem[] = [
+      ...deposits
+        .sort((a, b) => b.tree_index - a.tree_index)
+        .map((d) => ({
+          id: `dep-${d.address}-${d.tree_index}`,
+          kind: 'withdrawal' as const,
+          title: 'Top up',
+          subtitle: `${d.address}`,
+          amountWei: BigInt(d.value),
+          at: d.tree_index,
+        })),
       ...cards.map((c) => ({
         id: `card-${c.id}`,
         kind: 'card' as const,
         title: c.name,
         subtitle: `Card load · ${new Date(c.createdAt).toLocaleString()}`,
-        amountWei: -BigInt(c.amountWei), // a card load spends from the balance
+        amountWei: -BigInt(c.amountWei),
         at: c.createdAt,
       })),
-      ...deposits.map((d) => ({
-        id: `dep-${d.address}-${d.treeIndex}`,
-        kind: 'withdrawal' as const,
-        title: 'Top up',
-        subtitle: new Date(d.firstSeenAt).toLocaleString(),
-        amountWei: BigInt(d.valueWei),
-        at: d.firstSeenAt,
-      })),
-    ].sort((a, b) => b.at - a.at);
+    ];
     setHistory(items);
   }, []);
+
+
 
   useEffect(() => {
     reload();

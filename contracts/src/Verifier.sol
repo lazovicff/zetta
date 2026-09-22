@@ -25,7 +25,7 @@ interface ISingleWithdrawVerifier {
         uint256[2] calldata pA,
         uint256[2][2] calldata pB,
         uint256[2] calldata pC,
-        uint256[3] calldata pubSignals
+        uint256[4] calldata pubSignals
     ) external view returns (bool);
 }
 
@@ -149,7 +149,8 @@ contract Verifier {
         token.teleport(addr, delta);
     }
 
-    /// pubSignals = [transferRoot, recipient, value]
+    /// pubSignals = [transferRoot, recipient, indexWithOffset, value]
+    /// indexWithOffset is an ordering token (mirrors Nova withdraw z0[0]) — not checked here.
     function withdrawSingle(
         uint256 chainId,
         address addr,
@@ -157,7 +158,7 @@ contract Verifier {
         uint256[2] calldata pA,
         uint256[2][2] calldata pB,
         uint256[2] calldata pC,
-        uint256[3] calldata pubSignals
+        uint256[4] calldata pubSignals
     ) external {
         require(chainId == block.chainid, "wrong chain");
 
@@ -165,7 +166,7 @@ contract Verifier {
 
         uint256 transferRoot_ = pubSignals[0];
         uint256 proofRecipient = pubSignals[1];
-        uint256 sum = pubSignals[2];
+        uint256 sum = pubSignals[3];
 
         require(transferRoot_ == transferRoot, "unknown root");
         require(proofRecipient == recipient, "recipient mismatch");
@@ -178,6 +179,7 @@ contract Verifier {
 
         token.teleport(addr, delta);
     }
+
 
     function computeRecipient(uint256 chainId, address addr, bytes32 tweak)
         public

@@ -425,6 +425,26 @@ impl Db {
             .map_err(Into::into)
     }
 
+    /// Latest pubkey registered under a display user id (Crockford handle).
+    pub async fn pubkey_by_user_id(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<Fr>, Box<dyn std::error::Error>> {
+        let row = sqlx::query(
+            "SELECT pubkey_x FROM registrations WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.0)
+        .await?;
+        match row {
+            None => Ok(None),
+            Some(r) => {
+                let bytes: Vec<u8> = r.try_get("pubkey_x")?;
+                Ok(Some(blob_to_fr(&bytes)))
+            }
+        }
+    }
+
     // ---- spend accounting (cards + withdraws) ----
 
     /// Total reserved across cards and withdraws — what /balance subtracts.

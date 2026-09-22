@@ -44,6 +44,7 @@ pub fn spawn_http_server(app: AppState, listener: tokio::net::TcpListener) {
             .route("/recipient", get(current_recipient))
             .route("/register", post(register))
             .route("/deposits", get(deposits))
+            .route("/deposits-by-user-id/:user_id", get(deposits_by_user_id))
             .route("/balance/:pubkey_x", get(balance))
             .route("/cards", post(order_card))
             .route("/next_card_nonce/:pubkey_x", get(next_card_nonce))
@@ -391,20 +392,48 @@ async fn status(AxumState(app): AxumState<AppState>) -> impl IntoResponse {
     .into_response()
 }
 
-async fn deposits(AxumState(app): AxumState<AppState>) -> impl IntoResponse {
-    let s = app.state.lock().unwrap();
-    let list: Vec<_> = s
-        .deposits
+/// Claimable deposits (tree index >= registration boundary) for every address
+/// whose registered pubkey is `pk_x`.
+fn deposit_rows(s: &State, pk_x: Fr) -> Vec<serde_json::Value> {
+    s.deposits
         .iter()
+        .filter(|(addr, _)| s.pubkey_by_addr.get(*addr).map(|p| p.into_affine().x) == Some(pk_x))
         .flat_map(|(addr, ds)| {
-            ds.iter().map(move |(value, idx)| {
-                serde_json::json!({
-                    "address": format!("0x{}", hex::encode(addr)),
-                    "value": value.to_string(),
-                    "tree_index": idx,
+            let from = s.registered_from.get(addr).copied().unwrap_or(u64::MAX);
+            ds.iter().filter_map(move |(value, idx)| {
+                (*idx as u64 >= from).then(|| {
+                    serde_json::json!({
+                        "address": format!("0x{}", hex::encode(addr)),
+                        "value": value.to_string(),
+                        "tree_index": idx,
+                    })
                 })
             })
         })
-        .collect();
-    Json(serde_json::json!({ "deposits": list })).into_response()
+        .collect()
+}
+
+async fn deposits(
+    AxumState(app): AxumState<AppState>,
+    Path(pk): Path<String>,
+) -> impl IntoResponse {
+    let pk_x = match parse_decimal_fr(&pk) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let s = app.state.lock().unwrap();
+    Json(serde_json::json!({ "deposits": deposit_rows(&s, pk_x) })).into_response()
+}
+
+async fn deposits_by_user_id(
+    AxumState(app): AxumState<AppState>,
+    Path(user_id): Path<String>,
+) -> impl IntoResponse {
+    let pk_x = match app.db.pubkey_by_user_id(&user_id).await {
+        Ok(Some(pk)) => pk,
+        Ok(None) => return (StatusCode::NOT_FOUND, "unknown user id").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let s = app.state.lock().unwrap();
+    Json(serde_json::json!({ "deposits": deposit_rows(&s, pk_x) })).into_response()
 }

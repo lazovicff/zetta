@@ -44,13 +44,14 @@ export interface RemoteDeposit {
   tree_index: number;
 }
 
-export async function getDeposits(): Promise<RemoteDeposit[]> {
+export async function getDeposits(pubkeyX: bigint): Promise<RemoteDeposit[]> {
   if (!SERVER_URL) throw new Error('EXPO_PUBLIC_SERVER_URL is not set — check mobile/.env');
-  const res = await fetch(`${SERVER_URL}/deposits`);
+  const res = await fetch(`${SERVER_URL}/deposits/${pubkeyX.toString(10)}`);
   if (!res.ok) throw new Error(`GET /deposits failed: ${res.status}`);
   const { deposits } = (await res.json()) as { deposits: RemoteDeposit[] };
   return deposits;
 }
+
 
 export interface CardOrderResult {
   amount: string;

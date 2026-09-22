@@ -131,8 +131,14 @@ export function TopUpSheet({
             <>
               <Text style={styles.title}>Deposit address</Text>
               <Text style={styles.subtitle}>{network?.name}</Text>
-              <View style={styles.addressRow}>
-                <Text style={styles.address} selectable>
+              <View style={styles.addressCard}>
+                <Text
+                  style={styles.address}
+                  numberOfLines={1}
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.5}
+                  selectable
+                >
                   {address}
                 </Text>
                 <Pressable
@@ -195,12 +201,23 @@ const styles = StyleSheet.create({
     padding: 14,
     gap: 12,
   },
-  address: { color: '#eee', fontFamily: mono, fontSize: 14, flex: 1 },
+  addressCard: {
+    backgroundColor: '#1f1f24',
+    borderRadius: 12,
+    padding: 14,
+  },
+  address: {
+    color: '#eee',
+    fontFamily: mono,
+    fontSize: 15, // shrunk by adjustsFontSizeToFit until it fits on one line
+    textAlign: 'center',
+  },
   copyButton: {
     backgroundColor: '#e8e6e3',
     borderRadius: 8,
-    paddingVertical: 8,
-    paddingHorizontal: 14,
+    paddingVertical: 10,
+    alignItems: 'center',
+    marginTop: 12,
   },
   copyText: { color: '#000', fontSize: 13, fontWeight: '600' },
   note: { color: '#b8902a', fontSize: 13, lineHeight: 19, marginTop: 14 },
