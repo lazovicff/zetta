@@ -110,6 +110,24 @@ pub struct PendingWithdraw {
     pub destination: [u8; 20],
 }
 
+#[derive(Clone, Debug)]
+pub struct CardOrderRow {
+    pub provider_ref: String,
+    pub amount: U256,
+    pub fee: U256,
+    pub status: String,
+    pub created_at: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct WithdrawRow {
+    pub ref_: String,
+    pub amount: U256,
+    pub destination: [u8; 20],
+    pub status: String,
+    pub created_at: i64,
+}
+
 #[derive(Clone)]
 pub struct Db(PgPool);
 
@@ -361,6 +379,34 @@ impl Db {
         Ok(out)
     }
 
+    /// Latest row per request, newest first — the feed behind GET /withdraws/:pubkey_x.
+    pub async fn withdraw_history(&self, pubkey_x: Fr) -> Result<Vec<WithdrawRow>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT ON (ref) ref, amount, destination, status, created_at
+             FROM withdraws
+             WHERE pubkey_x = $1
+             ORDER BY ref, id DESC",
+        )
+        .bind(fr_to_blob(pubkey_x))
+        .fetch_all(&self.0)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let dest: Vec<u8> = r.try_get("destination")?;
+            out.push(WithdrawRow {
+                ref_: r.try_get("ref")?,
+                amount: blob_to_u256(&r.try_get::<Vec<u8>, _>("amount")?),
+                destination: dest
+                    .try_into()
+                    .map_err(|_| sqlx::Error::Decode("bad destination length".into()))?,
+                status: r.try_get("status")?,
+                created_at: r.try_get("created_at")?,
+            });
+        }
+        out.sort_by(|a, b| b.created_at.cmp(&a.created_at)); // DISTINCT ON loses chronology
+        Ok(out)
+    }
+
     pub async fn insert_registration(
         &self,
         r: &Registration,
@@ -585,5 +631,30 @@ impl Db {
             return Err(format!("order {provider_ref} not succeeded (or missing)"));
         }
         Ok(())
+    }
+
+    /// Latest row per order, newest first — the feed behind GET /cards/:pubkey_x.
+    pub async fn card_orders(&self, pubkey_x: Fr) -> Result<Vec<CardOrderRow>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT DISTINCT ON (provider_ref) provider_ref, amount, fee, status, created_at
+             FROM card_orders
+             WHERE pubkey_x = $1
+             ORDER BY provider_ref, id DESC",
+        )
+        .bind(fr_to_blob(pubkey_x))
+        .fetch_all(&self.0)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in &rows {
+            out.push(CardOrderRow {
+                provider_ref: r.try_get("provider_ref")?,
+                amount: blob_to_u256(&r.try_get::<Vec<u8>, _>("amount")?),
+                fee: blob_to_u256(&r.try_get::<Vec<u8>, _>("fee")?),
+                status: r.try_get("status")?,
+                created_at: r.try_get("created_at")?,
+            });
+        }
+        out.sort_by(|a, b| b.created_at.cmp(&a.created_at)); // DISTINCT ON loses chronology
+        Ok(out)
     }
 }

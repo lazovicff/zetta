@@ -4,7 +4,7 @@
   "private": true,
   "main": "index.ts",
   "scripts": {
-    "start": "expo start",
+    "start": "expo start -c",
     "test": "vitest run",
     "android": "expo start --android",
     "ios": "expo start --ios"
@@ -13,8 +13,7 @@
     "@expo/vector-icons": "^15.0.2",
     "@noble/curves": "1.9.6",
     "@noble/hashes": "^1.8.0",
-    "@react-native-async-storage/async-storage": "2.2.0",
-    "expo": "~57.0.22",
+    "expo": "~57.0.24",
     "expo-blur": "~57.0.3",
     "expo-clipboard": "~57.0.2",
     "expo-secure-store": "~57.0.4",
@@ -22,7 +21,7 @@
     "poseidon-lite": "0.3.0",
     "react": "19.2.3",
     "react-native": "0.86.3",
-    "react-native-get-random-values": "2.0.0"
+    "react-native-get-random-values": "~1.11.0"
   },
   "devDependencies": {
     "@types/react": "~19.2.2",

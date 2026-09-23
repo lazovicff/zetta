@@ -13,7 +13,7 @@ import {
 import { getRecipient, registerBurnAddress } from '../api';
 import { burnAddress, pubkey, randomSalt, schnorrSign } from '../crypto';
 import { NETWORKS, type Network } from '../networks';
-import { addEntry, getOrCreateIdentitySecret } from '../storage';
+import { getOrCreateIdentitySecret } from '../storage';
 
 type Stage = 'network' | 'address';
 
@@ -69,13 +69,6 @@ export function TopUpSheet({
           sigR: sig.sigR,
           sigZ: sig.sigZ,
           salt,
-        });
-        await addEntry({
-          address: addr,
-          pubkeyX: p.x.toString(10),
-          salt: salt.toString(10),
-          recipient: recipient.toString(10),
-          createdAt: Date.now(),
         });
 
         setAddress(addr);

@@ -2,15 +2,9 @@ import { Ionicons } from '@expo/vector-icons';
 import { useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
+import { cardCreatedMs, cardCvc, cardExpiry, cardNumber } from '../cards';
 import { formatUsd } from '../format';
-import type { CardEntry } from '../types';
-
-// Legacy cards predate the cvc field — derive a stable stub so they still render.
-function legacyCvc(id: string): string {
-  let h = 0;
-  for (const ch of id) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  return String(h % 1000).padStart(3, '0');
-}
+import type { CardOrderRow } from '../api';
 
 const group = (digits: string) => digits.replace(/(.{4})/g, '$1 ').trim();
 const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
@@ -29,19 +23,18 @@ function Bar({ frac, color, label, value }: { frac: number; color: string; label
   );
 }
 
-export function CardDetailScreen({ card, onBack }: { card: CardEntry; onBack: () => void }) {
+export function CardDetailScreen({ order, onBack }: { order: CardOrderRow; onBack: () => void }) {
   const [revealed, setRevealed] = useState(false);
 
-  const total = BigInt(card.amountWei);
-  const spent = BigInt(card.spentWei);
-  const left = total - spent;
-  const fundsFrac = total === 0n ? 0 : Number((left * 10_000n) / total) / 10_000;
-  const lifeFrac = clamp01((card.expiresAt - Date.now()) / (card.expiresAt - card.createdAt));
+  const total = BigInt(order.amount); // no per-card spend feed from the stub provider
+  const createdMs = cardCreatedMs(order);
+  const exp = cardExpiry(createdMs);
+  const lifeFrac = clamp01((exp.getTime() - Date.now()) / (exp.getTime() - createdMs));
 
-  const cvc = card.cvc ?? legacyCvc(card.id);
-  const exp = new Date(card.expiresAt);
+  const number = cardNumber(order.provider_ref);
+  const cvc = cardCvc(order.provider_ref);
   const expStr = `${String(exp.getMonth() + 1).padStart(2, '0')}/${String(exp.getFullYear()).slice(2)}`;
-  const numberDisplay = revealed ? group(card.number) : `•••• •••• •••• ${card.number.slice(-4)}`;
+  const numberDisplay = revealed ? group(number) : `•••• •••• •••• ${number.slice(-4)}`;
 
   return (
     <View style={styles.root}>
@@ -72,7 +65,7 @@ export function CardDetailScreen({ card, onBack }: { card: CardEntry; onBack: ()
           <View style={styles.cardBottom}>
             <View style={styles.metaCol}>
               <Text style={styles.metaLabel}>Card holder</Text>
-              <Text style={styles.metaValue} numberOfLines={1}>{card.name}</Text>
+              <Text style={styles.metaValue} numberOfLines={1}>Zetta card</Text>
             </View>
             <View style={styles.metaCol}>
               <Text style={styles.metaLabel}>Expires</Text>
@@ -95,7 +88,7 @@ export function CardDetailScreen({ card, onBack }: { card: CardEntry; onBack: ()
 
         {/* Funds + validity */}
         <View style={styles.bars}>
-          <Bar frac={fundsFrac} color="#e8e6e3" label="Funds left" value={formatUsd(left)} />
+          <Bar frac={1} color="#e8e6e3" label="Loaded" value={formatUsd(total)} />
           <Bar frac={lifeFrac} color="#7d7d86" label="Valid until" value={expStr} />
         </View>
 

@@ -1,20 +1,31 @@
 import { useCallback, useEffect, useState } from 'react';
 import { FlatList, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
 
+import { CardOrderRow, getCardOrders } from '../api';
 import { CardView } from '../components/CardView';
 import { CreateCardSheet } from '../components/CreateCardSheet';
+import { pubkey } from '../crypto';
+import { getIdentitySecret } from '../storage';
 import { CardDetailScreen } from './CardDetailScreen';
-import { listCards } from '../storage';
-import type { CardEntry } from '../types';
 
 export function CardsScreen() {
-  const [cards, setCards] = useState<CardEntry[]>([]);
+  const [orders, setOrders] = useState<CardOrderRow[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [sheetOpen, setSheetOpen] = useState(false);
-  const [selected, setSelected] = useState<CardEntry | null>(null);
+  const [selected, setSelected] = useState<CardOrderRow | null>(null);
 
   const reload = useCallback(async () => {
-    setCards(await listCards());
+    const secret = await getIdentitySecret();
+    if (secret == null) {
+      setOrders([]);
+      return;
+    }
+    try {
+      const rows = await getCardOrders(pubkey(secret).x);
+      setOrders(rows.filter((o) => o.status !== 'failed'));
+    } catch (e) {
+      console.warn('getCardOrders failed', e); // keep last-known list
+    }
   }, []);
 
   useEffect(() => {
@@ -22,7 +33,7 @@ export function CardsScreen() {
   }, [reload]);
 
   if (selected) {
-    return <CardDetailScreen card={selected} onBack={() => setSelected(null)} />;
+    return <CardDetailScreen order={selected} onBack={() => setSelected(null)} />;
   }
 
   return (
@@ -35,9 +46,9 @@ export function CardsScreen() {
       </Pressable>
 
       <FlatList
-        data={cards}
-        keyExtractor={(c) => c.id}
-        renderItem={({ item }) => <CardView card={item} onPress={() => setSelected(item)} />}
+        data={orders}
+        keyExtractor={(o) => o.provider_ref}
+        renderItem={({ item }) => <CardView order={item} onPress={() => setSelected(item)} />}
         ListEmptyComponent={
           <Text style={styles.empty}>No cards yet.{'\n'}Create one to start spending.</Text>
         }
@@ -52,7 +63,7 @@ export function CardsScreen() {
             tintColor="#bbb"
           />
         }
-        contentContainerStyle={cards.length === 0 && styles.emptyContainer}
+        contentContainerStyle={orders.length === 0 && styles.emptyContainer}
       />
 
       <CreateCardSheet

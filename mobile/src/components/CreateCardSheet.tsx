@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
+  Keyboard,
+  KeyboardAvoidingView,
   Modal,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -12,24 +15,7 @@ import {
 import { getBalance, getNextCardNonce, orderCard } from '../api';
 import { pubkey, schnorrSignOrder } from '../crypto';
 import { parseUsd } from '../format';
-import { addCard, getOrCreateIdentitySecret } from '../storage';
-
-/** Placeholder PAN — the 'stub' provider returns no card number yet. */
-function stubCardNumber(): string {
-  const buf = new Uint8Array(15);
-  crypto.getRandomValues(buf);
-  return '4' + [...buf].map((b) => (b % 10).toString()).join('');
-}
-
-/** Placeholder 3-digit CVC. */
-function stubCvc(): string {
-  const buf = new Uint8Array(3);
-  crypto.getRandomValues(buf);
-  return [...buf].map((b) => (b % 10).toString()).join('');
-}
-
-
-const CARD_LIFETIME_MS = 3 * 365 * 24 * 3600 * 1000; // 3y, local convention
+import { getOrCreateIdentitySecret } from '../storage';
 
 export function CreateCardSheet({
   visible,
@@ -40,14 +26,12 @@ export function CreateCardSheet({
   onClose: () => void;
   onCreated: () => Promise<void>;
 }) {
-  const [name, setName] = useState('');
   const [amount, setAmount] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (visible) {
-      setName('');
       setAmount('');
       setError(null);
     }
@@ -59,7 +43,6 @@ export function CreateCardSheet({
     try {
       const amountWei = parseUsd(amount);
       if (amountWei <= 0n) throw new Error('Amount must be above zero');
-      if (!name.trim()) throw new Error('Give the card a name');
 
       // single identity key — balance and lifetime spend are tracked per pubkey,
       // aggregated server-side across every registered burn address
@@ -71,26 +54,12 @@ export function CreateCardSheet({
 
       const nonce = await getNextCardNonce(pubkeyX);
       const sig = schnorrSignOrder(secret, amountWei, BigInt(nonce));
-      const res = await orderCard({
+      await orderCard({
         pubkeyX,
         amount: amountWei,
         nonce,
         sigR: sig.sigR,
         sigZ: sig.sigZ,
-      });
-
-
-      const now = Date.now();
-      await addCard({
-        id: res.provider_ref,
-        name: name.trim(),
-        number: stubCardNumber(),
-        cvc: stubCvc(),
-        amountWei: amountWei.toString(10),
-        spentWei: '0',
-        pubkeyX: pubkeyX.toString(10),
-        createdAt: now,
-        expiresAt: now + CARD_LIFETIME_MS,
       });
 
       await onCreated();
@@ -100,56 +69,58 @@ export function CreateCardSheet({
     } finally {
       setBusy(false);
     }
-  }, [name, amount, onCreated, onClose]);
+  }, [amount, onCreated, onClose]);
 
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
-      <View style={styles.overlay}>
-        <Pressable style={styles.backdrop} onPress={busy ? undefined : onClose} />
-        <View style={styles.sheet}>
-          <Text style={styles.title}>New card</Text>
-
-          <Text style={styles.label}>Card name</Text>
-          <TextInput
-            style={styles.input}
-            value={name}
-            onChangeText={setName}
-            placeholder="e.g. Subscriptions"
-            placeholderTextColor="#555"
-            editable={!busy}
-          />
-
-          <Text style={styles.label}>Amount (USD)</Text>
-          <TextInput
-            style={styles.input}
-            value={amount}
-            onChangeText={setAmount}
-            placeholder="25.00"
-            placeholderTextColor="#555"
-            keyboardType="decimal-pad"
-            editable={!busy}
-          />
-
-          {error && <Text style={styles.error}>{error}</Text>}
-
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        style={styles.flex}
+      >
+        <View style={styles.overlay}>
           <Pressable
-            style={({ pressed }) => [styles.create, (busy || pressed) && styles.dim]}
-            onPress={submit}
-            disabled={busy}
-          >
-            {busy ? (
-              <ActivityIndicator color="#000" />
-            ) : (
-              <Text style={styles.createText}>Create card</Text>
-            )}
+            style={styles.backdrop}
+            onPress={() => {
+              Keyboard.dismiss();
+              if (!busy) onClose();
+            }}
+          />
+          <Pressable style={styles.sheet} onPress={Keyboard.dismiss} accessible={false}>
+            <Text style={styles.title}>New card</Text>
+
+            <Text style={styles.label}>Amount (USD)</Text>
+            <TextInput
+              style={styles.input}
+              value={amount}
+              onChangeText={setAmount}
+              placeholder="25.00"
+              placeholderTextColor="#555"
+              keyboardType="decimal-pad"
+              editable={!busy}
+            />
+
+            {error && <Text style={styles.error}>{error}</Text>}
+
+            <Pressable
+              style={({ pressed }) => [styles.create, (busy || pressed) && styles.dim]}
+              onPress={submit}
+              disabled={busy}
+            >
+              {busy ? (
+                <ActivityIndicator color="#000" />
+              ) : (
+                <Text style={styles.createText}>Create card</Text>
+              )}
+            </Pressable>
           </Pressable>
         </View>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
+  flex: { flex: 1 },
   overlay: { flex: 1, justifyContent: 'flex-end' },
   backdrop: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.55)' },
   sheet: {

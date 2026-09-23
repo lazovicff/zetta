@@ -116,3 +116,79 @@ export async function getNextCardNonce(pubkeyX: bigint): Promise<number> {
    });
    if (!res.ok) throw new Error(await res.text()); // server returns plain-text errors
  }
+
+ export async function getNextWithdrawNonce(pubkeyX: bigint): Promise<number> {
+   if (!SERVER_URL) throw new Error('EXPO_PUBLIC_SERVER_URL is not set — check mobile/.env');
+   const res = await fetch(`${SERVER_URL}/next_withdraw_nonce/${pubkeyX.toString(10)}`);
+   if (!res.ok) throw new Error(`GET /next_withdraw_nonce failed: ${res.status}`);
+   const { nonce } = (await res.json()) as { nonce: number };
+   return nonce;
+ }
+
+ export interface WithdrawResult {
+   ref: string;
+   amount: string;
+   fee: string;
+   payout: string;
+   status: string; // 'pending' — the worker pays out asynchronously
+ }
+
+ /** POST /withdraw — debits `amount`; `destination` receives amount − fee. */
+ export async function requestWithdraw(req: {
+   pubkeyX: bigint;
+   amount: bigint;      // wei, debited
+   destination: string; // 0x + 40 hex
+   nonce: number;       // per-user nonce from /next_withdraw_nonce
+   sigR: { x: bigint; y: bigint };
+   sigZ: bigint;
+ }): Promise<WithdrawResult> {
+   if (!SERVER_URL) throw new Error('EXPO_PUBLIC_SERVER_URL is not set — check mobile/.env');
+   const res = await fetch(`${SERVER_URL}/withdraw`, {
+     method: 'POST',
+     headers: { 'content-type': 'application/json' },
+     body: JSON.stringify({
+       pubkey_x: req.pubkeyX.toString(10),
+       amount: req.amount.toString(10),
+       destination: req.destination,
+       nonce: req.nonce,
+       sig_r: [req.sigR.x.toString(10), req.sigR.y.toString(10)],
+       sig_z: req.sigZ.toString(10),
+     }),
+   });
+   if (!res.ok) throw new Error(await res.text()); // server returns plain-text errors
+   return (await res.json()) as WithdrawResult;
+ }
+
+export interface CardOrderRow {
+  provider_ref: string;
+  amount: string; // wei loaded onto the card, decimal
+  fee: string;    // wei, charged on TOP of amount
+  status: 'pending' | 'succeeded' | 'failed' | 'closed';
+  created_at: number; // unix seconds
+}
+
+/** Card orders for one pubkey — latest status per order, newest first. */
+export async function getCardOrders(pubkeyX: bigint): Promise<CardOrderRow[]> {
+  if (!SERVER_URL) throw new Error('EXPO_PUBLIC_SERVER_URL is not set — check mobile/.env');
+  const res = await fetch(`${SERVER_URL}/cards/${pubkeyX.toString(10)}`);
+  if (!res.ok) throw new Error(`GET /cards failed: ${res.status}`);
+  const { orders } = (await res.json()) as { orders: CardOrderRow[] };
+  return orders;
+}
+
+export interface WithdrawRow {
+  ref: string;
+  amount: string;      // wei debited, decimal (fee comes OUT of this)
+  destination: string; // 0x…
+  status: 'pending' | 'succeeded' | 'failed';
+  created_at: number;  // unix seconds
+}
+
+/** Withdraw requests for one pubkey — latest status per request, newest first. */
+export async function getWithdraws(pubkeyX: bigint): Promise<WithdrawRow[]> {
+  if (!SERVER_URL) throw new Error('EXPO_PUBLIC_SERVER_URL is not set — check mobile/.env');
+  const res = await fetch(`${SERVER_URL}/withdraws/${pubkeyX.toString(10)}`);
+  if (!res.ok) throw new Error(`GET /withdraws failed: ${res.status}`);
+  const { withdraws } = (await res.json()) as { withdraws: WithdrawRow[] };
+  return withdraws;
+}

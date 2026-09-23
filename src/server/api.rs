@@ -47,8 +47,10 @@ pub fn spawn_http_server(app: AppState, listener: tokio::net::TcpListener) {
             .route("/deposits-by-user-id/:user_id", get(deposits_by_user_id))
             .route("/balance/:pubkey_x", get(balance))
             .route("/cards", post(order_card))
+            .route("/cards/:pubkey_x", get(card_orders))
             .route("/next_card_nonce/:pubkey_x", get(next_card_nonce))
             .route("/withdraw", post(request_withdraw))
+            .route("/withdraws/:pubkey_x", get(withdraw_history))
             .route("/next_withdraw_nonce/:pubkey_x", get(next_withdraw_nonce))
             .route("/status", get(status))
             .with_state(app);
@@ -290,6 +292,33 @@ async fn order_card_inner(app: &AppState, req: CardOrderReq) -> Result<serde_jso
     }
 }
 
+/// Latest status per card order for a pubkey — History's "Card load" rows.
+async fn card_orders(
+    AxumState(app): AxumState<AppState>,
+    Path(pk): Path<String>,
+) -> impl IntoResponse {
+    let pk_x = match parse_decimal_fr(&pk) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    match app.db.card_orders(pk_x).await {
+        Ok(orders) => Json(serde_json::json!({
+            "orders": orders
+                .iter()
+                .map(|o| serde_json::json!({
+                    "provider_ref": o.provider_ref,
+                    "amount": o.amount.to_string(),
+                    "fee": o.fee.to_string(),
+                    "status": o.status,
+                    "created_at": o.created_at,
+                }))
+                .collect::<Vec<_>>()
+        }))
+        .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct WithdrawReq {
     pubkey_x: String,    // decimal
@@ -377,6 +406,33 @@ async fn withdraw_inner(app: &AppState, req: WithdrawReq) -> Result<serde_json::
         "payout": payout.to_string(),
         "status": "pending",
     }))
+}
+
+/// Latest status per withdraw request for a pubkey — History's "Withdraw" rows.
+async fn withdraw_history(
+    AxumState(app): AxumState<AppState>,
+    Path(pk): Path<String>,
+) -> impl IntoResponse {
+    let pk_x = match parse_decimal_fr(&pk) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    match app.db.withdraw_history(pk_x).await {
+        Ok(rows) => Json(serde_json::json!({
+            "withdraws": rows
+                .iter()
+                .map(|w| serde_json::json!({
+                    "ref": w.ref_,
+                    "amount": w.amount.to_string(),
+                    "destination": format!("0x{}", hex::encode(w.destination)),
+                    "status": w.status,
+                    "created_at": w.created_at,
+                }))
+                .collect::<Vec<_>>()
+        }))
+        .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }
 
 async fn status(AxumState(app): AxumState<AppState>) -> impl IntoResponse {

@@ -14,7 +14,8 @@ import { weierstrass } from '@noble/curves/abstract/weierstrass';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { poseidon2, poseidon3 } from 'poseidon-lite';
 
-const CARD_ORDER_DOMAIN = 0x63617264n; // "card" — matches CARD_ORDER_DOMAIN in src/server/db.rs
+const CARD_ORDER_DOMAIN = 0x63617264n // "card" — matches CARD_ORDER_DOMAIN in src/server/db.rs
+const WITHDRAW_DOMAIN = 0x77697468n; // "with" — matches WITHDRAW_DOMAIN in src/server/db.rs
 /** Coordinate field modulus (== bn254 scalar field r). */
 export const FQ_MODULUS =
   21888242871839275222246405745257275088548364400416034343698204186575808495617n;
@@ -127,6 +128,29 @@ export function schnorrSignOrder(secret: bigint, amount: bigint, nonce: bigint):
   const k = randomScalar();
   const R = toAffine(Point.BASE.multiply(k));
   const msg = poseidon3([CARD_ORDER_DOMAIN, amount, nonce]);
+  const e = poseidon3([R.x, P.x, msg]);
+  const sigZ = Fr.add(k, Fr.mul(e % FR_MODULUS, secret));
+  return { sigR: R, sigZ };
+}
+
+/**
+ * Withdraw-request auth, matching try_withdraw in src/server/db.rs:
+ *   inner = poseidon2(amount, destination_as_field)  // addr bytes as be integer == address_to_fr
+ *   msg   = poseidon3(WITHDRAW_DOMAIN, inner, nonce)
+ *   e     = poseidon3(R.x, P.x, msg)
+ *   z     = k + e·x (mod Fr)
+ */
+export function schnorrSignWithdraw(
+  secret: bigint,
+  amount: bigint,
+  destination: string,
+  nonce: bigint,
+): SchnorrSig {
+  const P = pubkey(secret);
+  const k = randomScalar();
+  const R = toAffine(Point.BASE.multiply(k));
+  const inner = poseidon2([amount, BigInt(destination)]); // 0x-hex parses to the big-endian integer
+  const msg = poseidon3([WITHDRAW_DOMAIN, inner, nonce]);
   const e = poseidon3([R.x, P.x, msg]);
   const sigZ = Fr.add(k, Fr.mul(e % FR_MODULUS, secret));
   return { sigR: R, sigZ };

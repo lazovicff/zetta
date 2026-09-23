@@ -9,10 +9,11 @@ import {
 } from 'react-native';
 
 import { pubkey } from '../crypto';
-import { getBalance, getDeposits, RemoteDeposit } from '../api';
+import { CardOrderRow, getBalance, getCardOrders, getDeposits, getWithdraws, RemoteDeposit, WithdrawRow } from '../api';
 import { TopUpSheet } from '../components/TopUpSheet';
+import { WithdrawSheet } from '../components/WithdrawSheet';
 import { formatUsd } from '../format';
-import { listCards, getIdentitySecret } from '../storage';
+import { getIdentitySecret } from '../storage';
 import type { HistoryItem } from '../types';
 
 export function HomeScreen() {
@@ -20,10 +21,13 @@ export function HomeScreen() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [topUpOpen, setTopUpOpen] = useState(false);
+  const [withdrawOpen, setWithdrawOpen] = useState(false);
 
   const reload = useCallback(async () => {
     const secret = await getIdentitySecret();
     let deposits: RemoteDeposit[] = [];
+    let orders: CardOrderRow[] = [];
+    let withdraws: WithdrawRow[] = [];
     if (secret != null) {
       const pkX = pubkey(secret).x;
       try {
@@ -33,42 +37,59 @@ export function HomeScreen() {
       }
       try {
         deposits = await getDeposits(pkX);
-        console.warn('deposits', JSON.stringify(deposits));
       } catch (e) {
         console.warn('getDeposits failed', e);
       }
-
+      try {
+        orders = await getCardOrders(pkX);
+      } catch (e) {
+        console.warn('getCardOrders failed', e);
+      }
+      try {
+        withdraws = await getWithdraws(pkX);
+      } catch (e) {
+        console.warn('getWithdraws failed', e);
+      }
     } else {
       setBalanceWei(0n);
     }
-    const cards = await listCards();
 
-    // deposits first (newest leaf first), then cards (newest first) — deposits
-    // carry no timestamp, so there's no common time axis with cards.
+    // deposits first (newest leaf first), then card orders (newest first) — no
+    // common time axis between the two.
     const items: HistoryItem[] = [
       ...deposits
         .sort((a, b) => b.tree_index - a.tree_index)
         .map((d) => ({
           id: `dep-${d.address}-${d.tree_index}`,
-          kind: 'withdrawal' as const,
+          kind: 'deposit' as const,
           title: 'Top up',
           subtitle: `${d.address.slice(0, 7)}…${d.address.slice(-5)}`,
           amountWei: BigInt(d.value),
           at: d.tree_index,
         })),
-      ...cards.map((c) => ({
-        id: `card-${c.id}`,
-        kind: 'card' as const,
-        title: c.name,
-        subtitle: `Card load · ${new Date(c.createdAt).toLocaleString()}`,
-        amountWei: -BigInt(c.amountWei),
-        at: c.createdAt,
-      })),
+      ...orders
+        .filter((o) => o.status !== 'failed') // failed released the reservation — nothing was spent
+        .map((o) => ({
+          id: `card-${o.provider_ref}`,
+          kind: 'card' as const,
+          title: 'Card load',
+          subtitle: new Date(o.created_at * 1000).toLocaleString(),
+          amountWei: -(BigInt(o.amount) + BigInt(o.fee)), // fee is charged ON TOP of the load
+          at: o.created_at * 1000,
+        })),
+      ...withdraws
+        .filter((w) => w.status !== 'failed') // failed released the reservation — nothing was spent
+        .map((w) => ({
+          id: `wd-${w.ref}`,
+          kind: 'withdraw' as const,
+          title: 'Withdraw',
+          subtitle: `${w.destination.slice(0, 7)}…${w.destination.slice(-5)}`,
+          amountWei: -BigInt(w.amount), // fee comes OUT of this amount
+          at: w.created_at * 1000,
+        })),
     ];
     setHistory(items);
   }, []);
-
-
 
   useEffect(() => {
     reload();
@@ -79,12 +100,20 @@ export function HomeScreen() {
       <Text style={styles.balanceLabel}>Total balance</Text>
       <Text style={styles.balance}>{balanceWei == null ? '—' : formatUsd(balanceWei)}</Text>
 
-      <Pressable
-        style={({ pressed }) => [styles.topUp, pressed && styles.dim]}
-        onPress={() => setTopUpOpen(true)}
-      >
-        <Text style={styles.topUpText}>+ Top Up</Text>
-      </Pressable>
+      <View style={styles.actions}>
+        <Pressable
+          style={({ pressed }) => [styles.action, styles.topUp, pressed && styles.dim]}
+          onPress={() => setTopUpOpen(true)}
+        >
+          <Text style={styles.topUpText}>+ Top Up</Text>
+        </Pressable>
+        <Pressable
+          style={({ pressed }) => [styles.action, styles.withdraw, pressed && styles.dim]}
+          onPress={() => setWithdrawOpen(true)}
+        >
+          <Text style={styles.withdrawText}>− Withdraw</Text>
+        </Pressable>
+      </View>
 
       <Text style={styles.section}>History</Text>
       <FlatList
@@ -128,6 +157,11 @@ export function HomeScreen() {
         onClose={() => setTopUpOpen(false)}
         onCreated={reload}
       />
+      <WithdrawSheet
+        visible={withdrawOpen}
+        onClose={() => setWithdrawOpen(false)}
+        onCreated={reload}
+      />
     </View>
   );
 }
@@ -136,15 +170,12 @@ const styles = StyleSheet.create({
   root: { flex: 1, paddingHorizontal: 16, paddingTop: 64 },
   balanceLabel: { color: '#888', fontSize: 13 },
   balance: { color: '#fff', fontSize: 40, fontWeight: '700', marginTop: 4 },
-  topUp: {
-    backgroundColor: '#e8e6e3',
-    borderRadius: 12,
-    paddingVertical: 14,
-    alignItems: 'center',
-    marginTop: 20,
-    marginBottom: 24,
-  },
+  actions: { flexDirection: 'row', gap: 10, marginTop: 20, marginBottom: 24 },
+  action: { flex: 1, borderRadius: 12, paddingVertical: 14, alignItems: 'center' },
+  topUp: { backgroundColor: '#e8e6e3' },
+  withdraw: { backgroundColor: 'transparent', borderWidth: 1, borderColor: '#3a3a40' },
   topUpText: { color: '#000', fontSize: 16, fontWeight: '600' },
+  withdrawText: { color: '#eee', fontSize: 16, fontWeight: '600' },
   section: { color: '#888', fontSize: 13, marginBottom: 10 },
   row: {
     flexDirection: 'row',
