@@ -9,7 +9,7 @@ export const anvil = defineChain({
 });
 
 export const config = getDefaultConfig({
-  appName: "Zetta DAI",
+  appName: "Zetta USDC",
   projectId: process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID ?? "",
   chains: [anvil],
   transports: {

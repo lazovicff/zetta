@@ -5,7 +5,7 @@ export default function Home() {
   return (
     <main className="wrap">
       <div className="header">
-        <h1>Zetta DAI</h1>
+        <h1>Zetta USDC</h1>
         <ConnectButton />
       </div>
       <Tabs />

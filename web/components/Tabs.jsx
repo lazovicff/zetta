@@ -2,13 +2,9 @@
 
 import { useState } from "react";
 import { WrapUnwrap } from "@/components/WrapUnwrap";
-import { StakeUnstake } from "@/components/StakeUnstake";
-import { Rewards } from "@/components/Rewards";
 
 const TABS = [
   { id: "wrap", label: "Wrap / Unwrap" },
-  { id: "stake", label: "Stake / Unstake" },
-  { id: "rewards", label: "Rewards" },
 ];
 
 export function Tabs() {
@@ -29,8 +25,6 @@ export function Tabs() {
       </div>
 
       {active === "wrap" && <WrapUnwrap />}
-      {active === "stake" && <StakeUnstake />}
-      {active === "rewards" && <Rewards />}
     </div>
   );
 }

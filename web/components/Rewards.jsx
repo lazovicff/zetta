@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useAccount } from "wagmi";
-import { formatEther } from "viem";
+import { formatUnits } from "viem";
 import { useClaim, useExit, useBalances } from "@/hooks/useZetta";
 
 export function Rewards() {
@@ -30,7 +30,7 @@ export function Rewards() {
       <div className="field">
         <div className="field-label">Available rewards</div>
         <div className="field-row">
-          <span className="value">{formatEther(b.rewards)}</span>
+          <span className="value">{formatUnits(b.rewards, 6)}</span>
           <span className="token">DAI</span>
         </div>
       </div>

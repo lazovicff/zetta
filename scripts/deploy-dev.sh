@@ -14,5 +14,5 @@ BROADCAST=broadcast/Deploy.s.sol/$CHAIN_ID/run-latest.json
 TOKEN=$(jq -r '.transactions[] | select(.transactionType == "CREATE" and .contractName == "zERC20") | .contractAddress' "$BROADCAST")
 echo "TOKEN=$TOKEN"
 
-cast send "$TOKEN" "transfer(address,uint256)" "$CLIENT" $(cast --to-wei 1000 ether) \
+cast send "$TOKEN" "transfer(address,uint256)" "$CLIENT" 1000000000 \
   --private-key "$KEY" --rpc-url "$RPC_URL"

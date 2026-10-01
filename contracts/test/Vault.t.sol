@@ -3,48 +3,51 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {zERC20} from "../src/zERC20.sol";
-import {DAIVault} from "../src/DAIVault.sol";
-import {MockDAI} from "../mocks/MockDAI.sol";
-import {MockSDAI} from "../mocks/MockSDAI.sol";
+import {USDCVault} from "../src/USDCVault.sol";
+import {MockUSDC} from "../mocks/MockUSDC.sol";
 
 contract VaultTest is Test {
-    MockDAI dai;
-    MockSDAI sdai;
+    MockUSDC usdc;
     zERC20 token;
-    DAIVault daiVault;
+    USDCVault vault;
 
     address alice = address(0xA11CE);
 
     function setUp() public {
-        dai = new MockDAI();
-        sdai = new MockSDAI(dai);
-        token = new zERC20("Zetta DAI", "zDAI");
-        daiVault = new DAIVault(dai, sdai, token);
+        usdc = new MockUSDC();
+        token = new zERC20("Zetta USDC", "zUSDC");
+        vault = new USDCVault(usdc, token);
 
-        token.setMinter(address(daiVault));
+        token.setMinter(address(vault));
 
-        dai.mint(alice, 1000 ether);
+        usdc.mint(alice, 1000e6);
     }
 
     function test_wrap_mints_1to1() public {
         vm.startPrank(alice);
-        dai.approve(address(daiVault), 100 ether);
-        daiVault.wrap(100 ether);
+        usdc.approve(address(vault), 100e6);
+        vault.wrap(100e6);
         vm.stopPrank();
 
-        assertEq(token.balanceOf(alice), 100 ether);
-        assertEq(sdai.balanceOf(address(daiVault)), 100 ether);
+        assertEq(token.balanceOf(alice), 100e6);
+        assertEq(usdc.balanceOf(address(vault)), 100e6);
     }
 
-    function test_unwrap_returns_dai() public {
+    function test_unwrap_returns_usdc() public {
         vm.startPrank(alice);
-        dai.approve(address(daiVault), 100 ether);
-        daiVault.wrap(100 ether);
-        daiVault.unwrap(40 ether);
+        usdc.approve(address(vault), 100e6);
+        vault.wrap(100e6);
+        vault.unwrap(40e6);
         vm.stopPrank();
 
-        assertEq(token.balanceOf(alice), 60 ether);
-        assertEq(dai.balanceOf(alice), 940 ether);
+        assertEq(token.balanceOf(alice), 60e6);
+        assertEq(usdc.balanceOf(alice), 940e6);
     }
 
+    function test_unwrap_reverts_without_balance() public {
+        vm.startPrank(alice);
+        vm.expectRevert();
+        vault.unwrap(1e6);
+        vm.stopPrank();
+    }
 }

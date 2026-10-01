@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useAccount } from "wagmi";
-import { formatEther } from "viem";
+import { formatUnits } from "viem";
 import { useWrap, useUnwrap, useBalances } from "@/hooks/useZetta";
 
 export function WrapUnwrap() {
@@ -20,10 +20,10 @@ export function WrapUnwrap() {
 
   if (!mounted || !isConnected) return null;
 
-  const payToken = flipped ? "zDAI" : "DAI";
-  const receiveToken = flipped ? "DAI" : "zDAI";
-  const payBalance = flipped ? b.zdai : b.dai;
-  const receiveBalance = flipped ? b.dai : b.zdai;
+  const payToken = flipped ? "zUSDC" : "USDC";
+  const receiveToken = flipped ? "USDC" : "zUSDC";
+  const payBalance = flipped ? b.zusdc : b.usdc;
+  const receiveBalance = flipped ? b.usdc : b.zusdc;
 
   const run = async (fn) => {
     setBusy(true);
@@ -43,8 +43,8 @@ export function WrapUnwrap() {
           <span className="token">{payToken}</span>
         </div>
         <div className="balance-row">
-          <span className="balance">Balance: {formatEther(payBalance)}</span>
-          <button className="max" onClick={() => setAmount(formatEther(payBalance))}>Max</button>
+          <span className="balance">Balance: {formatUnits(payBalance, 6)}</span>
+          <button className="max" onClick={() => setAmount(formatUnits(payBalance, 6))}>Max</button>
         </div>
       </div>
 
@@ -59,7 +59,7 @@ export function WrapUnwrap() {
           <span className="token">{receiveToken}</span>
         </div>
         <div className="balance-row">
-          <span className="balance">Balance: {formatEther(receiveBalance)}</span>
+          <span className="balance">Balance: {formatUnits(receiveBalance, 6)}</span>
         </div>
       </div>
 

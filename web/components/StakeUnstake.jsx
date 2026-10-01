@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useAccount } from "wagmi";
-import { formatEther } from "viem";
+import { formatUnits } from "viem";
 import { useStake, useUnstake, useBalances } from "@/hooks/useZetta";
 
 export function StakeUnstake() {
@@ -43,8 +43,8 @@ export function StakeUnstake() {
           <span className="token">{payToken}</span>
         </div>
         <div className="balance-row">
-          <span className="balance">Balance: {formatEther(payBalance)}</span>
-          <button className="max" onClick={() => setAmount(formatEther(payBalance))}>Max</button>
+          <span className="balance">Balance: {formatUnits(payBalance, 6)}</span>
+          <button className="max" onClick={() => setAmount(formatUnits(payBalance, 6))}>Max</button>
         </div>
       </div>
 
@@ -59,7 +59,7 @@ export function StakeUnstake() {
           <span className="token">{receiveToken}</span>
         </div>
         <div className="balance-row">
-          <span className="balance">Balance: {formatEther(receiveBalance)}</span>
+          <span className="balance">Balance: {formatUnits(receiveBalance, 6)}</span>
         </div>
       </div>
 

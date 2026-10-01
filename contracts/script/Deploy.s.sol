@@ -3,8 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Script, console} from "forge-std/Script.sol";
 import {zERC20} from "../src/zERC20.sol";
-import {DAIVault} from "../src/DAIVault.sol";
-import {RewardDistributor} from "../src/RewardDistributor.sol";
+import {USDCVault} from "../src/USDCVault.sol";
 import {
     Verifier,
     IRootTransitionVerifier,
@@ -16,8 +15,7 @@ import {NovaDecider as RootVerifier} from "../src/verifiers/RootTransitionVerifi
 import {NovaDecider as WithdrawVerifier} from "../src/verifiers/WithdrawVerifier.sol";
 import {Groth16Verifier as SingleWithdrawVerifier} from "../src/verifiers/SingleWithdrawVerifier.sol";
 import {Groth16Verifier as SingleRootTransitionVerifier} from "../src/verifiers/SingleRootTransitionVerifier.sol";
-import {MockDAI} from "../mocks/MockDAI.sol";
-import {MockSDAI} from "../mocks/MockSDAI.sol";
+import {MockUSDC} from "../mocks/MockUSDC.sol";
 
 contract Deploy is Script {
     uint256 constant INITIAL_ROOT =
@@ -26,14 +24,10 @@ contract Deploy is Script {
     function run() external {
         vm.startBroadcast();
 
-        MockDAI dai = new MockDAI();
-        MockSDAI sdai = new MockSDAI(dai);
+        MockUSDC usdc = new MockUSDC();
 
-        zERC20 token = new zERC20("Zetta DAI", "zDAI");
-        DAIVault daiVault = new DAIVault(dai, sdai, token);
-        RewardDistributor distributor = new RewardDistributor(token, dai, address(daiVault));
-        daiVault.setYieldRecipient(address(distributor));
-        daiVault.setProtocolFeeRecipient(msg.sender);
+        zERC20 token = new zERC20("Zetta USDC", "zUSDC");
+        USDCVault vault = new USDCVault(usdc, token);
 
         RootVerifier rootV = new RootVerifier();
         WithdrawVerifier withdrawV = new WithdrawVerifier();
@@ -48,18 +42,17 @@ contract Deploy is Script {
             ISingleRootTransitionVerifier(address(singleRootV))
         );
 
-        dai.mint(msg.sender, 1000 ether);
-        token.mint(msg.sender, 1000 ether); // before handing over minter
+        usdc.mint(msg.sender, 1000e6);
+        token.mint(msg.sender, 1000e6); // before handing over minter
 
-        token.setMinter(address(daiVault));
+        token.setMinter(address(vault));
         token.setVerifier(address(verifier));
 
         vm.stopBroadcast();
 
-        console.log("dai       =", address(dai));
-        console.log("sdai      =", address(sdai));
+        console.log("usdc      =", address(usdc));
         console.log("token     =", address(token));
-        console.log("vault     =", address(daiVault));
+        console.log("vault     =", address(vault));
         console.log("verifier  =", address(verifier));
         console.log("rootV     =", address(rootV));
         console.log("withdrawV =", address(withdrawV));
