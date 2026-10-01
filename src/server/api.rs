@@ -12,6 +12,7 @@ use ark_grumpkin::{Affine as G2Affine, Projective as G2};
 
 use crate::burn::{recipient, trim_to_160};
 use crate::server::db::{Registration, fr_to_u256, unix_now};
+use crate::server::laso::wei_to_usd;
 use crate::server::state::State;
 use crate::server::{AppState, parse_decimal_fq, parse_decimal_fr, parse_hex20};
 use crate::zkp::poseidon3;
@@ -48,6 +49,7 @@ pub fn spawn_http_server(app: AppState, listener: tokio::net::TcpListener) {
             .route("/balance/:pubkey_x", get(balance))
             .route("/cards", post(order_card))
             .route("/cards/:pubkey_x", get(card_orders))
+            .route("/cards/:pubkey_x/:provider_ref/details", get(card_details))
             .route("/next_card_nonce/:pubkey_x", get(next_card_nonce))
             .route("/withdraw", post(request_withdraw))
             .route("/withdraws/:pubkey_x", get(withdraw_history))
@@ -251,7 +253,7 @@ async fn order_card_inner(app: &AppState, req: CardOrderReq) -> Result<serde_jso
     let fee = amount_u256 * U256::from(fee_bps) / U256::from(10_000u64);
 
     // 1. verify sig + reserve funds atomically (status 'pending')
-    let provider_ref = format!("stub-{amount_u256}-{}", unix_now());
+    let provider_ref = format!("laso-{amount_u256}-{}", unix_now());
     let new_spent = app
         .db
         .try_card_order(
@@ -263,31 +265,36 @@ async fn order_card_inner(app: &AppState, req: CardOrderReq) -> Result<serde_jso
             available,
             r,
             z,
-            "stub",
+            "laso",
             &provider_ref,
         )
         .await?;
 
-    // 2. provider call — stub always succeeds; real provider goes here
-    match Ok::<_, String>(()) {
-        Ok(()) => {
+    // 2. provider call: x402-paid order from the operator wallet (mock or real,
+    //    same protocol — LASO_URL decides which).
+    match app.laso.order_card(&wei_to_usd(amount_u256)).await {
+        Ok(o) => {
             app.db
-                .settle_card_order(&provider_ref, "succeeded", None)
+                .settle_card_order(
+                    &provider_ref,
+                    "succeeded",
+                    None,
+                    Some((&o.card_id, &o.auth.id_token, &o.auth.refresh_token)),
+                )
                 .await?;
             Ok(serde_json::json!({
                 "amount": amount_u256.to_string(),
                 "fee": fee.to_string(),
-                "provider": "stub",
+                "provider": "laso",
                 "provider_ref": provider_ref,
                 "lifetime_spent": new_spent.to_string(),
             }))
         }
         Err(e) => {
-            let msg = e.to_string();
             app.db
-                .settle_card_order(&provider_ref, "failed", Some(&msg))
+                .settle_card_order(&provider_ref, "failed", Some(&e), None)
                 .await?;
-            Err(format!("card provider failed: {msg}"))
+            Err(format!("card provider failed: {e}"))
         }
     }
 }
@@ -317,6 +324,66 @@ async fn card_orders(
         .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
+}
+
+/// Card details, proxied from Laso. Issue takes ~7-10s — callers poll every
+/// 2-3s until `status` is "ready". 404 = stub-era order (pre-LASO_URL).
+async fn card_details(
+    AxumState(app): AxumState<AppState>,
+    Path((pk, provider_ref)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let pk_x = match parse_decimal_fr(&pk) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let link = match app.db.card_link(pk_x, &provider_ref).await {
+        Ok(Some(l)) => l,
+        Ok(None) => return (StatusCode::NOT_FOUND, "unknown order").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    if link.status == "failed" {
+        return (StatusCode::NOT_FOUND, "order failed").into_response();
+    }
+    let (Some(card_id), Some(id_token), Some(refresh_token)) =
+        (link.card_id, link.id_token, link.refresh_token)
+    else {
+        // Reservation in flight or order predates the provider integration.
+        return Json(serde_json::json!({ "status": "pending" })).into_response();
+    };
+    match laso_card_data(&app, &provider_ref, &card_id, &id_token, &refresh_token).await {
+        Ok(data) => Json(data).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, e).into_response(),
+    }
+}
+
+/// /get-card-data with one 401-retry: refresh_token first, full SIWX sign-in
+/// as fallback. New tokens are appended to card_orders (latest row wins).
+async fn laso_card_data(
+    app: &AppState,
+    provider_ref: &str,
+    card_id: &str,
+    id_token: &str,
+    refresh_token: &str,
+) -> Result<serde_json::Value, String> {
+    let (status, body) = app.laso.card_data(id_token, card_id).await?;
+    if status == 401 {
+        let auth = match app.laso.refresh(refresh_token).await {
+            Ok(a) => a,
+            Err(_) => app.laso.auth().await?,
+        };
+        app.db
+            .refresh_card_tokens(provider_ref, &auth.id_token, &auth.refresh_token)
+            .await?;
+        let (status, body) = app.laso.card_data(&auth.id_token, card_id).await?;
+        if status != 200 {
+            return Err(format!("laso /get-card-data {status}: {body}"));
+        }
+        return Ok(body);
+    }
+    if status != 200 {
+        return Err(format!("laso /get-card-data {status}: {body}"));
+    }
+    Ok(body)
 }
 
 #[derive(serde::Deserialize)]

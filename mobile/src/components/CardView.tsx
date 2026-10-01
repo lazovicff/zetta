@@ -1,8 +1,11 @@
+import { useEffect, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
+import { getCardDetails, type CardOrderRow } from '../api';
 import { cardCreatedMs, cardExpiry, cardNumber } from '../cards';
+import { pubkey } from '../crypto';
 import { formatUsd } from '../format';
-import type { CardOrderRow } from '../api';
+import { getIdentitySecret } from '../storage';
 
 const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
 
@@ -15,13 +18,40 @@ function Bar({ frac, color }: { frac: number; color: string }) {
 }
 
 export function CardView({ order, onPress }: { order: CardOrderRow; onPress?: () => void }) {
-  const total = BigInt(order.amount); // no per-card spend feed from the stub provider
+  const [last4, setLast4] = useState<string | null>(null);
+  const [liveExp, setLiveExp] = useState<string | null>(null);
+
+  // Provider card data via the zetta server; stub display until ready/missing.
+  useEffect(() => {
+    if (order.status !== 'succeeded') return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const secret = await getIdentitySecret();
+        if (!secret) return;
+        const d = await getCardDetails(pubkey(secret).x, order.provider_ref);
+        if (cancelled || !d?.card_details) return;
+        setLast4(d.card_details.card_number.slice(-4));
+        setLiveExp(`${d.card_details.exp_month}/${d.card_details.exp_year.slice(-2)}`);
+      } catch {
+        // server/provider down — stub display stays
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [order.provider_ref, order.status]);
+
+  const total = BigInt(order.amount);
   const createdMs = cardCreatedMs(order);
   const exp = cardExpiry(createdMs);
   const lifeFrac = clamp01((exp.getTime() - Date.now()) / (exp.getTime() - createdMs));
   const expStr = `${String(exp.getMonth() + 1).padStart(2, '0')}/${String(exp.getFullYear()).slice(2)}`;
-  const number = cardNumber(order.provider_ref);
-  const masked = `${number.slice(0, 4)} •••• •••• ${number.slice(-4)}`;
+  const masked = (() => {
+    if (last4 != null) return `•••• •••• •••• ${last4}`;
+    const n = cardNumber(order.provider_ref);
+    return `${n.slice(0, 4)} •••• •••• ${n.slice(-4)}`;
+  })();
 
   return (
     <Pressable
@@ -33,7 +63,7 @@ export function CardView({ order, onPress }: { order: CardOrderRow; onPress?: ()
           Zetta card
         </Text>
         <Text style={styles.exp}>
-          {order.status === 'succeeded' ? expStr : order.status}
+          {order.status === 'succeeded' ? (liveExp ?? expStr) : order.status}
         </Text>
       </View>
       <Text style={styles.number}>{masked}</Text>
@@ -43,7 +73,7 @@ export function CardView({ order, onPress }: { order: CardOrderRow; onPress?: ()
         <Bar frac={1} color="#e8e6e3" />
       </View>
       <View style={styles.barRow}>
-        <Text style={styles.barLabel}>expires {expStr}</Text>
+        <Text style={styles.barLabel}>expires {liveExp ?? expStr}</Text>
         <Bar frac={lifeFrac} color="#7d7d86" />
       </View>
     </Pressable>

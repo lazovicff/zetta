@@ -3,6 +3,8 @@ use alloy::primitives::Address;
 pub struct Config {
     pub rpc_url: String,
     pub database_url: String,
+    /// Card provider base URL (mock-laso in dev, https://laso.finance in prod).
+    pub laso_url: String,
     pub token: Address,
     pub verifier: Address,
     pub private_key: String,
@@ -24,6 +26,7 @@ impl Config {
         Ok(Self {
             rpc_url: std::env::var("RPC_URL")?,
             database_url: std::env::var("DATABASE_URL")?,
+            laso_url: std::env::var("LASO_URL")?,
             token: deployed_address(chain_id, "zERC20")?,
             verifier: deployed_address(chain_id, "Verifier")?,
             private_key: std::env::var("PRIVATE_KEY")?,

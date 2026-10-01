@@ -1,5 +1,6 @@
 pub mod api;
 pub mod db;
+pub mod laso;
 pub mod state;
 pub mod worker;
 
@@ -44,6 +45,7 @@ pub struct AppState {
     pub state: SharedState,
     pub db: Db,
     pub provider: DynProvider, // wallet-backed, signs with PRIVATE_KEY
+    pub laso: laso::LasoClient,
 }
 
 fn u256_to_fr(v: U256) -> Fr {

@@ -584,23 +584,31 @@ impl Db {
     }
 
     /// Append a 'succeeded'/'failed' transition to an order still in 'pending'.
+    /// On success, `card` carries the provider's card id + auth tokens;
+    /// transitions without values inherit the previous row's (COALESCE), so a
+    /// later token-refresh row doesn't erase them.
     pub async fn settle_card_order(
         &self,
         provider_ref: &str,
         status: &str,
         error: Option<&str>,
+        card: Option<(&str, &str, &str)>, // (card_id, id_token, refresh_token)
     ) -> Result<(), String> {
         let res = sqlx::query(
-            "INSERT INTO card_orders (pubkey_x, user_id, amount, fee, provider, provider_ref, status, error, nonce, created_at, resolved_at)
-            SELECT pubkey_x, user_id, amount, fee, provider, provider_ref, $1, $2, nonce, created_at, $3
+            "INSERT INTO card_orders (pubkey_x, user_id, amount, fee, provider, provider_ref, status, error, nonce, created_at, resolved_at, card_id, id_token, refresh_token)
+            SELECT pubkey_x, user_id, amount, fee, provider, provider_ref, $1, $2, nonce, created_at, $3,
+                   COALESCE($4, card_id), COALESCE($5, id_token), COALESCE($6, refresh_token)
             FROM card_orders
-            WHERE provider_ref = $4
-              AND id = (SELECT MAX(id) FROM card_orders WHERE provider_ref = $4)
+            WHERE provider_ref = $7
+              AND id = (SELECT MAX(id) FROM card_orders WHERE provider_ref = $7)
               AND status = 'pending'",
         )
         .bind(status)
         .bind(error)
         .bind(unix_now())
+        .bind(card.map(|c| c.0))
+        .bind(card.map(|c| c.1))
+        .bind(card.map(|c| c.2))
         .bind(provider_ref)
         .execute(&self.0)
         .await
@@ -656,5 +664,67 @@ impl Db {
         }
         out.sort_by(|a, b| b.created_at.cmp(&a.created_at)); // DISTINCT ON loses chronology
         Ok(out)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CardLink {
+    pub status: String,
+    pub card_id: Option<String>,
+    pub id_token: Option<String>,
+    pub refresh_token: Option<String>,
+}
+
+impl Db {
+    /// Latest row of one order with provider metadata, for the details proxy.
+    pub async fn card_link(
+        &self,
+        pubkey_x: Fr,
+        provider_ref: &str,
+    ) -> Result<Option<CardLink>, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT status, card_id, id_token, refresh_token FROM card_orders
+             WHERE pubkey_x = $1 AND provider_ref = $2
+             ORDER BY id DESC LIMIT 1",
+        )
+        .bind(fr_to_blob(pubkey_x))
+        .bind(provider_ref)
+        .fetch_optional(&self.0)
+        .await?;
+        Ok(row.map(|r| CardLink {
+            status: r.try_get("status").unwrap_or_default(),
+            card_id: r.try_get("card_id").unwrap_or_default(),
+            id_token: r.try_get("id_token").unwrap_or_default(),
+            refresh_token: r.try_get("refresh_token").unwrap_or_default(),
+        }))
+    }
+
+    /// Token rotation, append-only: a fresh 'succeeded' row carrying the new
+    /// tokens (copying everything else). Latest row wins everywhere already.
+    pub async fn refresh_card_tokens(
+        &self,
+        provider_ref: &str,
+        id_token: &str,
+        refresh_token: &str,
+    ) -> Result<(), String> {
+        let res = sqlx::query(
+            "INSERT INTO card_orders (pubkey_x, user_id, amount, fee, provider, provider_ref, status, error, nonce, created_at, resolved_at, card_id, id_token, refresh_token)
+            SELECT pubkey_x, user_id, amount, fee, provider, provider_ref, status, error, nonce, created_at, $1, card_id, $2, $3
+            FROM card_orders
+            WHERE provider_ref = $4
+              AND id = (SELECT MAX(id) FROM card_orders WHERE provider_ref = $4)
+              AND status = 'succeeded'",
+        )
+        .bind(unix_now())
+        .bind(id_token)
+        .bind(refresh_token)
+        .bind(provider_ref)
+        .execute(&self.0)
+        .await
+        .map_err(|e| e.to_string())?;
+        if res.rows_affected() != 1 {
+            return Err(format!("order {provider_ref} not succeeded (or missing)"));
+        }
+        Ok(())
     }
 }

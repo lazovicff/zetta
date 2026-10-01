@@ -17,6 +17,9 @@ CREATE TABLE IF NOT EXISTS card_orders (
     status       text  NOT NULL
                  CHECK (status IN ('pending', 'succeeded', 'failed', 'closed')),
     error        text,                    -- provider failure reason, if any
+    card_id      text,                    -- provider's card id (Laso), set on 'succeeded'
+    id_token     text,                    -- Laso bearer for /get-card-data; latest row wins
+    refresh_token text,
     created_at   bigint NOT NULL CHECK (created_at > 0),  -- order placed at
     resolved_at  bigint                   -- this transition's time (NULL for pending)
 );

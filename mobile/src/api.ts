@@ -192,3 +192,43 @@ export async function getWithdraws(pubkeyX: bigint): Promise<WithdrawRow[]> {
   const { withdraws } = (await res.json()) as { withdraws: WithdrawRow[] };
   return withdraws;
 }
+
+// Card details, proxied from Laso by the zetta server. null = stub-era order
+// (pre-provider); callers keep the stub display. Poll while status is "pending".
+export interface RemoteCardDetails {
+  card_id: string;
+  card_type: string;
+  usd_amount?: number;
+  timestamp?: number;
+  status: 'pending' | 'ready' | string;
+  card_details?: {
+    card_number: string;
+    exp_month: string;
+    exp_year: string;
+    cvv: string;
+    available_balance: number;
+    billing_address: {
+      name: string;
+      line_1: string;
+      line_2: string;
+      city: string;
+      state: string;
+      zip: string;
+      country: string;
+    } | null;
+  };
+  transactions?: { amount: number; date: string; description: string; is_credit: boolean }[];
+}
+
+export async function getCardDetails(
+  pubkeyX: bigint,
+  providerRef: string,
+): Promise<RemoteCardDetails | null> {
+  if (!SERVER_URL) throw new Error('EXPO_PUBLIC_SERVER_URL is not set — check mobile/.env');
+  const res = await fetch(
+    `${SERVER_URL}/cards/${pubkeyX.toString(10)}/${encodeURIComponent(providerRef)}/details`,
+  );
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`GET /card-details failed: ${res.status}`);
+  return (await res.json()) as RemoteCardDetails;
+}

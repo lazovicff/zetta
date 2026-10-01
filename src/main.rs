@@ -30,6 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let signer: PrivateKeySigner = config.private_key.parse()?;
     let exchange_addr = signer.address().into_array();
+    let laso = zetta::server::laso::LasoClient::new(&config.laso_url, signer.clone());
     let provider = ProviderBuilder::new()
         .wallet(signer)
         .connect_http(config.rpc_url.parse()?);
@@ -57,6 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             state: state.clone(),
             db: db.clone(),
             provider: provider.clone().erased(),
+            laso,
         },
         listener,
     );

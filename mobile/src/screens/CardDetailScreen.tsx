@@ -1,13 +1,16 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { cardCreatedMs, cardCvc, cardExpiry, cardNumber } from '../cards';
 import { formatUsd } from '../format';
-import type { CardOrderRow } from '../api';
+import { getCardDetails, type CardOrderRow, type RemoteCardDetails } from '../api';
+import { pubkey } from '../crypto';
+import { getIdentitySecret } from '../storage';
 
 const group = (digits: string) => digits.replace(/(.{4})/g, '$1 ').trim();
 const clamp01 = (x: number) => Math.min(1, Math.max(0, x));
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 function Bar({ frac, color, label, value }: { frac: number; color: string; label: string; value: string }) {
   return (
@@ -25,16 +28,53 @@ function Bar({ frac, color, label, value }: { frac: number; color: string; label
 
 export function CardDetailScreen({ order, onBack }: { order: CardOrderRow; onBack: () => void }) {
   const [revealed, setRevealed] = useState(false);
+  const [remote, setRemote] = useState<RemoteCardDetails | null>(null);
 
-  const total = BigInt(order.amount); // no per-card spend feed from the stub provider
-  const createdMs = cardCreatedMs(order);
-  const exp = cardExpiry(createdMs);
-  const lifeFrac = clamp01((exp.getTime() - Date.now()) / (exp.getTime() - createdMs));
+  // Provider card data via the zetta server, polled until ready. null (stub-era
+  // order) or error -> stub display stays.
+  useEffect(() => {
+    if (order.status !== 'succeeded') return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const secret = await getIdentitySecret();
+        if (!secret) return;
+        const pkX = pubkey(secret).x;
+        for (let i = 0; i < 20 && !cancelled; i++) {
+          const d = await getCardDetails(pkX, order.provider_ref);
+          if (cancelled) return;
+          if (d == null) return; // stub-era order
+          setRemote(d);
+          if (d.status === 'ready' || d.status === 'complete') return;
+          await sleep(2000);
+        }
+      } catch {
+        // server/provider down — stub display stays
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [order.provider_ref, order.status]);
 
-  const number = cardNumber(order.provider_ref);
-  const cvc = cardCvc(order.provider_ref);
-  const expStr = `${String(exp.getMonth() + 1).padStart(2, '0')}/${String(exp.getFullYear()).slice(2)}`;
+  const details = remote?.card_details;
+
+  // Stub-derived fallbacks (pre-provider orders).
+  const totalWei = BigInt(order.amount);
+  const stubCreatedMs = cardCreatedMs(order);
+  const stubExp = cardExpiry(stubCreatedMs);
+  const stubExpStr = `${String(stubExp.getMonth() + 1).padStart(2, '0')}/${String(stubExp.getFullYear()).slice(2)}`;
+
+  const number = details?.card_number ?? cardNumber(order.provider_ref);
+  const cvc = details?.cvv ?? cardCvc(order.provider_ref);
+  const expStr = details ? `${details.exp_month}/${details.exp_year.slice(-2)}` : stubExpStr;
   const numberDisplay = revealed ? group(number) : `•••• •••• •••• ${number.slice(-4)}`;
+
+  const createdMs = remote?.timestamp ?? stubCreatedMs;
+  const expEndMs = details
+    ? new Date(Number(details.exp_year), Number(details.exp_month), 1).getTime() // first day after exp month
+    : stubExp.getTime();
+  const lifeFrac = clamp01((expEndMs - Date.now()) / (expEndMs - createdMs));
 
   return (
     <View style={styles.root}>
@@ -65,7 +105,9 @@ export function CardDetailScreen({ order, onBack }: { order: CardOrderRow; onBac
           <View style={styles.cardBottom}>
             <View style={styles.metaCol}>
               <Text style={styles.metaLabel}>Card holder</Text>
-              <Text style={styles.metaValue} numberOfLines={1}>Zetta card</Text>
+              <Text style={styles.metaValue} numberOfLines={1}>
+                {details?.billing_address?.name ?? 'Zetta card'}
+              </Text>
             </View>
             <View style={styles.metaCol}>
               <Text style={styles.metaLabel}>Expires</Text>
@@ -88,16 +130,63 @@ export function CardDetailScreen({ order, onBack }: { order: CardOrderRow; onBac
 
         {/* Funds + validity */}
         <View style={styles.bars}>
-          <Bar frac={1} color="#e8e6e3" label="Loaded" value={formatUsd(total)} />
+          {remote && details ? (
+            <Bar
+              frac={details.available_balance / (remote.usd_amount ?? details.available_balance)}
+              color="#e8e6e3"
+              label="Balance"
+              value={
+                remote.usd_amount != null
+                  ? `$${details.available_balance.toFixed(2)} of $${remote.usd_amount.toFixed(2)}`
+                  : `$${details.available_balance.toFixed(2)}`
+              }
+            />
+          ) : (
+            <Bar frac={1} color="#e8e6e3" label="Loaded" value={formatUsd(totalWei)} />
+          )}
           <Bar frac={lifeFrac} color="#7d7d86" label="Valid until" value={expStr} />
         </View>
 
+        {/* Billing address (what to enter when a merchant asks at checkout) */}
+        {revealed && details?.billing_address && (
+          <>
+            <Text style={styles.section}>Billing address</Text>
+            <View style={styles.billing}>
+              <Text style={styles.billingText}>{details.billing_address.name}</Text>
+              <Text style={styles.billingText}>
+                {[details.billing_address.line_1, details.billing_address.line_2]
+                  .filter(Boolean)
+                  .join(', ')}
+              </Text>
+              <Text style={styles.billingText}>
+                {details.billing_address.city}, {details.billing_address.state}{' '}
+                {details.billing_address.zip}, {details.billing_address.country}
+              </Text>
+            </View>
+          </>
+        )}
+
         {/* Transactions */}
         <Text style={styles.section}>Transactions</Text>
-        <View style={styles.txEmpty}>
-          <Ionicons name="receipt-outline" size={22} color="#555" />
-          <Text style={styles.txEmptyText}>No transactions on this card yet.</Text>
-        </View>
+        {remote?.transactions?.length ? (
+          <View style={styles.txList}>
+            {remote.transactions.map((t, i) => (
+              <View key={i} style={styles.txRow}>
+                <Text style={styles.txDesc} numberOfLines={1}>
+                  {t.description}
+                </Text>
+                <Text style={styles.txAmt}>
+                  {t.is_credit ? '+' : '−'}${Math.abs(t.amount).toFixed(2)}
+                </Text>
+              </View>
+            ))}
+          </View>
+        ) : (
+          <View style={styles.txEmpty}>
+            <Ionicons name="receipt-outline" size={22} color="#555" />
+            <Text style={styles.txEmptyText}>No transactions on this card yet.</Text>
+          </View>
+        )}
       </ScrollView>
     </View>
   );
@@ -183,6 +272,18 @@ const styles = StyleSheet.create({
   fill: { height: 6, borderRadius: 3 },
 
   section: { color: '#888', fontSize: 13, marginTop: 24, marginBottom: 10 },
+  billing: { backgroundColor: '#1a1a1e', borderRadius: 16, padding: 16, gap: 4 },
+  billingText: { color: '#ddd', fontSize: 13 },
+  txList: { backgroundColor: '#1a1a1e', borderRadius: 16, paddingVertical: 4 },
+  txRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+  },
+  txDesc: { color: '#ddd', fontSize: 13, flex: 1, marginRight: 12 },
+  txAmt: { color: '#eee', fontSize: 13, fontVariant: ['tabular-nums'] },
   txEmpty: {
     alignItems: 'center',
     backgroundColor: '#1a1a1e',
