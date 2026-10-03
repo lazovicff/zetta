@@ -127,12 +127,10 @@ export async function getNextCardNonce(pubkeyX: bigint): Promise<number> {
  export interface WithdrawResult {
    ref: string;
    amount: string;
-   fee: string;
-   payout: string;
    status: string; // 'pending' — the worker pays out asynchronously
  }
 
- /** POST /withdraw — debits `amount`; `destination` receives amount − fee. */
+ /** POST /withdraw — debits `amount`; `destination` receives amount. */
  export async function requestWithdraw(req: {
    pubkeyX: bigint;
    amount: bigint;
@@ -161,7 +159,6 @@ export async function getNextCardNonce(pubkeyX: bigint): Promise<number> {
 export interface CardOrderRow {
   provider_ref: string;
   amount: string;
-  fee: string;
   status: 'pending' | 'succeeded' | 'failed' | 'closed';
   created_at: number; // unix seconds
 }

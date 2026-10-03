@@ -13,10 +13,6 @@ pub struct Config {
     pub port: u16,
     pub chain_id: u64,
     pub last_block: u64,
-    /// Card issuance fee in basis points (1/100 of a percent) of the prepaid amount.
-    pub card_fee_bps: u64,
-    /// Withdraw fee in basis points, taken out of the requested amount.
-    pub withdraw_fee_bps: u64,
     /// Max unique registered pubkeys; new users are rejected at/above this.
     pub max_users: i64,
     /// Max non-failed card orders per user within `card_limit_window_days`.
@@ -41,8 +37,6 @@ impl Config {
             port: std::env::var("PORT")?.parse()?,
             chain_id,
             last_block: deployment_block(chain_id, "zERC20")?,
-            card_fee_bps: std::env::var("CARD_FEE_BPS")?.parse()?,
-            withdraw_fee_bps: std::env::var("WITHDRAW_FEE_BPS")?.parse()?,
             max_users: std::env::var("MAX_USERS")?.parse()?,
             max_cards_per_user: std::env::var("MAX_CARDS_PER_USER")?.parse()?,
             card_limit_window_days: std::env::var("CARD_LIMIT_WINDOW_DAYS")?.parse()?,

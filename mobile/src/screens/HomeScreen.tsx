@@ -74,7 +74,7 @@ export function HomeScreen() {
           kind: 'card' as const,
           title: 'Card load',
           subtitle: new Date(o.created_at * 1000).toLocaleString(),
-          amountWei: -(BigInt(o.amount) + BigInt(o.fee)), // fee is charged ON TOP of the load
+          amountWei: -BigInt(o.amount),
           at: o.created_at * 1000,
         })),
       ...withdraws
@@ -84,7 +84,7 @@ export function HomeScreen() {
           kind: 'withdraw' as const,
           title: 'Withdraw',
           subtitle: `${w.destination.slice(0, 7)}…${w.destination.slice(-5)}`,
-          amountWei: -BigInt(w.amount), // fee comes OUT of this amount
+          amountWei: -BigInt(w.amount),
           at: w.created_at * 1000,
         })),
     ];

@@ -76,7 +76,7 @@ export function WithdrawSheet({
         sigZ: sig.sigZ,
       });
 
-      setPayoutWei(BigInt(res.payout)); // payout = amount − fee
+      setPayoutWei(amountWei); // destination receives the full amount
       setDone(true);
       await onCreated();
     } catch (e) {
@@ -156,10 +156,6 @@ export function WithdrawSheet({
                   autoCorrect={false}
                   editable={!busy}
                 />
-
-                <Text style={styles.note}>
-                  The address receives the amount minus the withdraw fee.
-                </Text>
 
                 {error && <Text style={styles.error}>{error}</Text>}
 

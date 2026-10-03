@@ -2,11 +2,10 @@
 //! (PostgreSQL). Tables are created externally (src/schemas/*.sql).
 //!
 //! Accounting model (per pubkey_x):
-//!   available  = Σ(value − fee) over deposits          -- money in, neobank cut taken
-//!   reserved   = Σ over non-failed latest rows:
-//!                  card_orders: amount + fee           -- fee on TOP (prepaid, gone for good)
-//!                  withdraws:   amount                 -- fee comes OUT of amount
+//!   available  = Σ(value) over proven, registered deposits
+//!   reserved   = Σ over non-failed latest rows: card_orders + withdraws amounts
 //!   balance    = available − reserved
+//!
 //! 'closed' cards keep counting (the money is prepaid and unrecoverable);
 //! closing only stops the card from being the active one.
 
@@ -106,7 +105,6 @@ pub struct Registration {
 pub struct PendingWithdraw {
     pub ref_: String,
     pub amount: U256,
-    pub fee: U256,
     pub destination: [u8; 20],
 }
 
@@ -114,7 +112,6 @@ pub struct PendingWithdraw {
 pub struct CardOrderRow {
     pub provider_ref: String,
     pub amount: U256,
-    pub fee: U256,
     pub status: String,
     pub created_at: i64,
 }
@@ -151,7 +148,7 @@ fn row_to_registration(row: &sqlx::postgres::PgRow) -> Result<Registration, sqlx
     })
 }
 
-/// Σ reserved (non-failed latest rows): cards amount+fee, withdraws amount.
+/// Σ reserved (non-failed latest rows): cards amount, withdraws amount.
 async fn reserved<'e, E>(exec: E, pubkey_x: Fr) -> Result<U256, sqlx::Error>
 where
     E: sqlx::Executor<'e, Database = Postgres>,
@@ -159,7 +156,7 @@ where
     let mut total = U256::ZERO;
 
     let card_rows = sqlx::query(
-        "SELECT DISTINCT ON (provider_ref) amount, fee, status
+        "SELECT DISTINCT ON (provider_ref) amount, status
          FROM card_orders
          WHERE pubkey_x = $1
          ORDER BY provider_ref, id DESC",
@@ -172,8 +169,7 @@ where
             continue; // failed releases; pending/succeeded/closed all count
         }
         let amount: Vec<u8> = r.try_get("amount")?;
-        let fee: Vec<u8> = r.try_get("fee")?;
-        total += blob_to_u256(&amount) + blob_to_u256(&fee);
+        total += blob_to_u256(&amount);
     }
 
     Ok(total)
@@ -226,7 +222,7 @@ impl Db {
     /// Atomically verify the request signature, check balance, and record the
     /// withdraw ('pending'). Signed message:
     /// poseidon3(WITHDRAW_DOMAIN, poseidon2(amount, destination_fr), nonce).
-    /// Debited is `amount`; destination receives `amount - fee`.
+    /// Debited is `amount`; destination receives `amount` in full.
     /// `nonce` is client-supplied; must equal the user's next nonce.
     pub async fn try_withdraw(
         &self,
@@ -234,7 +230,6 @@ impl Db {
         pubkey_y: Fr,
         amount: Fr,
         nonce: i64,
-        fee: U256,
         available: U256,
         destination: [u8; 20],
         sig_r: G2Affine,
@@ -246,9 +241,6 @@ impl Db {
             return Err("stored pubkey invalid".into());
         }
         let amount_u256 = fr_to_u256(amount);
-        if fee > amount_u256 {
-            return Err("fee exceeds amount".into());
-        }
 
         let mut tx = self.0.begin().await.map_err(|e| e.to_string())?;
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
@@ -289,7 +281,7 @@ impl Db {
             .map_err(|e| e.to_string())?;
         let spent = cards + wds;
 
-        let new_spent = spent + amount_u256; // fee comes OUT of amount
+        let new_spent = spent + amount_u256;
         if new_spent > available {
             return Err(format!(
                 "insufficient balance: available {available}, spent {spent}, requested {amount_u256}"
@@ -297,16 +289,14 @@ impl Db {
         }
 
         let amount_bytes: [u8; 32] = amount_u256.to_be_bytes();
-        let fee_bytes: [u8; 32] = fee.to_be_bytes();
         sqlx::query(
-            "INSERT INTO withdraws (ref, pubkey_x, user_id, amount, fee, destination, status, nonce, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8)",
+            "INSERT INTO withdraws (ref, pubkey_x, user_id, amount, destination, status, nonce, created_at)
+             VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7)",
         )
         .bind(ref_)
         .bind(fr_to_blob(pubkey_x))
         .bind(user_id(pubkey_x))
         .bind(amount_bytes.as_slice())
-        .bind(fee_bytes.as_slice())
         .bind(destination.as_slice())
         .bind(nonce)
         .bind(unix_now())
@@ -328,8 +318,8 @@ impl Db {
         error: Option<&str>,
     ) -> Result<(), String> {
         let res = sqlx::query(
-            "INSERT INTO withdraws (ref, pubkey_x, user_id, amount, fee, destination, status, nonce, tx_hash, error, created_at, resolved_at)
-             SELECT ref, pubkey_x, user_id, amount, fee, destination, $1, nonce, $2, $3, created_at, $4
+            "INSERT INTO withdraws (ref, pubkey_x, user_id, amount, destination, status, nonce, tx_hash, error, created_at, resolved_at)
+             SELECT ref, pubkey_x, user_id, amount, destination, $1, nonce, $2, $3, created_at, $4
              FROM withdraws
              WHERE ref = $5
                AND id = (SELECT MAX(id) FROM withdraws WHERE ref = $5)
@@ -354,7 +344,7 @@ impl Db {
         &self,
     ) -> Result<Vec<PendingWithdraw>, Box<dyn std::error::Error>> {
         let rows = sqlx::query(
-            "SELECT w.ref, w.amount, w.fee, w.destination
+            "SELECT w.ref, w.amount, w.destination
              FROM withdraws w
              WHERE w.status = 'pending'
                AND NOT EXISTS (
@@ -370,7 +360,6 @@ impl Db {
             out.push(PendingWithdraw {
                 ref_: r.try_get("ref")?,
                 amount: blob_to_u256(&r.try_get::<Vec<u8>, _>("amount")?),
-                fee: blob_to_u256(&r.try_get::<Vec<u8>, _>("fee")?),
                 destination: dest
                     .try_into()
                     .map_err(|_| sqlx::Error::Decode("bad destination length".into()))?,
@@ -512,7 +501,6 @@ impl Db {
         pubkey_y: Fr,
         amount: Fr,
         nonce: i64,
-        fee: U256,
         available: U256,
         sig_r: G2Affine,
         sig_z: Fq,
@@ -556,10 +544,10 @@ impl Db {
         let spent = cards + wds;
 
         let amount_u256 = fr_to_u256(amount);
-        let new_spent = spent + amount_u256 + fee;
+        let new_spent = spent + amount_u256;
         if new_spent > available {
             return Err(format!(
-                "insufficient balance: available {available}, spent {spent}, requested {amount_u256} + fee {fee}"
+                "insufficient balance: available {available}, spent {spent}, requested {amount_u256}"
             ));
         }
 
@@ -585,15 +573,13 @@ impl Db {
         }
 
         let amount_bytes: [u8; 32] = amount_u256.to_be_bytes();
-        let fee_bytes: [u8; 32] = fee.to_be_bytes();
         sqlx::query(
-                "INSERT INTO card_orders (pubkey_x, user_id, amount, fee, provider, provider_ref, status, nonce, created_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8)",
+                "INSERT INTO card_orders (pubkey_x, user_id, amount, provider, provider_ref, status, nonce, created_at)
+                 VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7)",
             )
             .bind(fr_to_blob(pubkey_x))
             .bind(user_id(pubkey_x))
             .bind(amount_bytes.as_slice())
-            .bind(fee_bytes.as_slice())
             .bind(provider)
             .bind(provider_ref)
             .bind(nonce)
@@ -618,8 +604,8 @@ impl Db {
         card: Option<(&str, &str, &str)>, // (card_id, id_token, refresh_token)
     ) -> Result<(), String> {
         let res = sqlx::query(
-            "INSERT INTO card_orders (pubkey_x, user_id, amount, fee, provider, provider_ref, status, error, nonce, created_at, resolved_at, card_id, id_token, refresh_token)
-            SELECT pubkey_x, user_id, amount, fee, provider, provider_ref, $1, $2, nonce, created_at, $3,
+            "INSERT INTO card_orders (pubkey_x, user_id, amount, provider, provider_ref, status, error, nonce, created_at, resolved_at, card_id, id_token, refresh_token)
+            SELECT pubkey_x, user_id, amount, provider, provider_ref, $1, $2, nonce, created_at, $3,
                    COALESCE($4, card_id), COALESCE($5, id_token), COALESCE($6, refresh_token)
             FROM card_orders
             WHERE provider_ref = $7
@@ -646,8 +632,8 @@ impl Db {
     /// (prepaid money is gone); the card just stops being the active one.
     pub async fn close_card_order(&self, provider_ref: &str) -> Result<(), String> {
         let res = sqlx::query(
-            "INSERT INTO card_orders (pubkey_x, user_id, amount, fee, provider, provider_ref, status, nonce, created_at, resolved_at)
-            SELECT pubkey_x, user_id, amount, fee, provider, provider_ref, 'closed', nonce, created_at, $1
+            "INSERT INTO card_orders (pubkey_x, user_id, amount, provider, provider_ref, status, nonce, created_at, resolved_at)
+            SELECT pubkey_x, user_id, amount, provider, provider_ref, 'closed', nonce, created_at, $1
              FROM card_orders
              WHERE provider_ref = $2
                AND id = (SELECT MAX(id) FROM card_orders WHERE provider_ref = $2)
@@ -667,7 +653,7 @@ impl Db {
     /// Latest row per order, newest first — the feed behind GET /cards/:pubkey_x.
     pub async fn card_orders(&self, pubkey_x: Fr) -> Result<Vec<CardOrderRow>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT DISTINCT ON (provider_ref) provider_ref, amount, fee, status, created_at
+            "SELECT DISTINCT ON (provider_ref) provider_ref, amount, status, created_at
              FROM card_orders
              WHERE pubkey_x = $1
              ORDER BY provider_ref, id DESC",
@@ -680,7 +666,6 @@ impl Db {
             out.push(CardOrderRow {
                 provider_ref: r.try_get("provider_ref")?,
                 amount: blob_to_u256(&r.try_get::<Vec<u8>, _>("amount")?),
-                fee: blob_to_u256(&r.try_get::<Vec<u8>, _>("fee")?),
                 status: r.try_get("status")?,
                 created_at: r.try_get("created_at")?,
             });
@@ -752,8 +737,8 @@ impl Db {
         refresh_token: &str,
     ) -> Result<(), String> {
         let res = sqlx::query(
-            "INSERT INTO card_orders (pubkey_x, user_id, amount, fee, provider, provider_ref, status, error, nonce, created_at, resolved_at, card_id, id_token, refresh_token)
-            SELECT pubkey_x, user_id, amount, fee, provider, provider_ref, status, error, nonce, created_at, $1, card_id, $2, $3
+            "INSERT INTO card_orders (pubkey_x, user_id, amount, provider, provider_ref, status, error, nonce, created_at, resolved_at, card_id, id_token, refresh_token)
+            SELECT pubkey_x, user_id, amount, provider, provider_ref, status, error, nonce, created_at, $1, card_id, $2, $3
             FROM card_orders
             WHERE provider_ref = $4
               AND id = (SELECT MAX(id) FROM card_orders WHERE provider_ref = $4)

@@ -323,7 +323,7 @@ async fn payouts(
     let token = IToken::new(config.token, provider);
 
     for w in pendings {
-        let payout = w.amount.saturating_sub(w.fee);
+        let payout = w.amount;
         let ref_ = w.ref_.clone();
         let res = send_and_confirm(|| {
             let t = token.clone();

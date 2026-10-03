@@ -30,10 +30,6 @@ pub struct State {
     pub deposits: HashMap<[u8; 20], Vec<(Fr, usize)>>,
     /// Lifetime deposited value per address. Chain-derived; never trimmed.
     pub credits: HashMap<[u8; 20], U256>,
-    /// Card issuance fee in basis points of `amount`.
-    pub card_fee_bps: u64,
-    /// Withdraw fee in basis points, taken out of the requested amount.
-    pub withdraw_fee_bps: u64,
     /// Registration boundary per burn address: deposits at tree index >= this
     /// are claimable; earlier transfers to the address are treated as burned.
     pub registered_from: HashMap<[u8; 20], u64>,
@@ -64,8 +60,6 @@ impl State {
             salt_by_addr: HashMap::new(),
             deposits: HashMap::new(),
             credits: HashMap::new(),
-            card_fee_bps: config.card_fee_bps,
-            withdraw_fee_bps: config.withdraw_fee_bps,
             registered_from: HashMap::new(),
             blacklist: HashSet::new(),
             max_users: config.max_users,

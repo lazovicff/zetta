@@ -263,18 +263,16 @@ async fn order_card_inner(app: &AppState, req: CardOrderReq) -> Result<serde_jso
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "pubkey not registered".to_string())?;
 
-    let (available, fee_bps, max_cards, window_days) = {
+    let (available, max_cards, window_days) = {
         let s = app.state.lock().unwrap();
         (
             available_deposits(&s, pk_x),
-            s.card_fee_bps,
             s.max_cards_per_user,
             s.card_limit_window_days,
         )
     };
 
     let amount_u256 = fr_to_u256(amount);
-    let fee = amount_u256 * U256::from(fee_bps) / U256::from(10_000u64);
 
     // 1. verify sig + reserve funds atomically (status 'pending')
     let provider_ref = format!("laso-{amount_u256}-{}", unix_now());
@@ -285,7 +283,6 @@ async fn order_card_inner(app: &AppState, req: CardOrderReq) -> Result<serde_jso
             reg.pubkey_y,
             amount,
             req.nonce,
-            fee,
             available,
             r,
             z,
@@ -310,7 +307,6 @@ async fn order_card_inner(app: &AppState, req: CardOrderReq) -> Result<serde_jso
                 .await?;
             Ok(serde_json::json!({
                 "amount": amount_u256.to_string(),
-                "fee": fee.to_string(),
                 "provider": "laso",
                 "provider_ref": provider_ref,
                 "lifetime_spent": new_spent.to_string(),
@@ -341,7 +337,6 @@ async fn card_orders(
                 .map(|o| serde_json::json!({
                     "provider_ref": o.provider_ref,
                     "amount": o.amount.to_string(),
-                    "fee": o.fee.to_string(),
                     "status": o.status,
                     "created_at": o.created_at,
                 }))
@@ -415,7 +410,7 @@ async fn laso_card_data(
 #[derive(serde::Deserialize)]
 struct WithdrawReq {
     pubkey_x: String,    // decimal
-    amount: String,      // decimal token units (debited; payout = amount - fee)
+    amount: String,      // decimal token units
     destination: String, // 0x + 40 hex
     nonce: i64,          // per-user sequence; signs over it, single-use
     sig_r: (String, String),
@@ -466,14 +461,12 @@ async fn withdraw_inner(app: &AppState, req: WithdrawReq) -> Result<serde_json::
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "pubkey not registered".to_string())?;
 
-    let (available, fee_bps) = {
+    let available = {
         let s = app.state.lock().unwrap();
-        (available_deposits(&s, pk_x), s.withdraw_fee_bps)
+        available_deposits(&s, pk_x)
     };
 
     let amount_u256 = fr_to_u256(amount);
-    let fee = amount_u256 * U256::from(fee_bps) / U256::from(10_000u64);
-    let payout = amount_u256 - fee; // try_withdraw rejects fee > amount
 
     // Verify sig + reserve atomically (status 'pending'); the worker pays out.
     let ref_ = format!("wd-{amount_u256}-{}", unix_now());
@@ -483,7 +476,6 @@ async fn withdraw_inner(app: &AppState, req: WithdrawReq) -> Result<serde_json::
             reg.pubkey_y,
             amount,
             req.nonce,
-            fee,
             available,
             destination,
             r,
@@ -495,8 +487,6 @@ async fn withdraw_inner(app: &AppState, req: WithdrawReq) -> Result<serde_json::
     Ok(serde_json::json!({
         "ref": ref_,
         "amount": amount_u256.to_string(),
-        "fee": fee.to_string(),
-        "payout": payout.to_string(),
         "status": "pending",
     }))
 }
