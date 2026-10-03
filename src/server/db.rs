@@ -518,6 +518,8 @@ impl Db {
         sig_z: Fq,
         provider: &str,
         provider_ref: &str,
+        max_cards: i64,
+        window_days: i64,
     ) -> Result<U256, String> {
         let pk = G2Affine::new_unchecked(pubkey_x, pubkey_y);
         if !pk.is_on_curve() {
@@ -558,6 +560,27 @@ impl Db {
         if new_spent > available {
             return Err(format!(
                 "insufficient balance: available {available}, spent {spent}, requested {amount_u256} + fee {fee}"
+            ));
+        }
+
+        // Rolling issuance limit: max `max_cards` non-failed orders per user
+        // in the last `window_days`, checked under the spend lock.
+        let recent: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM (
+                 SELECT DISTINCT ON (provider_ref) status
+                 FROM card_orders
+                 WHERE pubkey_x = $1 AND created_at >= $2
+                 ORDER BY provider_ref, id DESC
+             ) t WHERE status != 'failed'",
+        )
+        .bind(fr_to_blob(pubkey_x))
+        .bind(unix_now() - window_days * 86_400)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+        if recent >= max_cards {
+            return Err(format!(
+                "card limit reached: max {max_cards} cards per {window_days} days"
             ));
         }
 
@@ -664,6 +687,27 @@ impl Db {
         }
         out.sort_by(|a, b| b.created_at.cmp(&a.created_at)); // DISTINCT ON loses chronology
         Ok(out)
+    }
+
+    /// All blacklisted sender addresses.
+    pub async fn blacklist(&self) -> Result<Vec<[u8; 20]>, sqlx::Error> {
+        let rows = sqlx::query("SELECT address FROM blacklist")
+            .fetch_all(&self.0)
+            .await?;
+        rows.iter()
+            .map(|r| {
+                let v: Vec<u8> = r.try_get("address")?;
+                v.try_into()
+                    .map_err(|_| sqlx::Error::Decode("bad blacklist address length".into()))
+            })
+            .collect()
+    }
+
+    /// Number of distinct registered pubkeys (unique users).
+    pub async fn unique_user_count(&self) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar("SELECT COUNT(DISTINCT pubkey_x) FROM registrations")
+            .fetch_one(&self.0)
+            .await
     }
 }
 

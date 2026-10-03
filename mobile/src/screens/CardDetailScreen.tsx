@@ -106,7 +106,7 @@ export function CardDetailScreen({ order, onBack }: { order: CardOrderRow; onBac
             <View style={styles.metaCol}>
               <Text style={styles.metaLabel}>Card holder</Text>
               <Text style={styles.metaValue} numberOfLines={1}>
-                {details?.billing_address?.name ?? 'Zetta card'}
+                {'Zetta card'}
               </Text>
             </View>
             <View style={styles.metaCol}>
@@ -128,25 +128,6 @@ export function CardDetailScreen({ order, onBack }: { order: CardOrderRow; onBac
           </Pressable>
         </View>
 
-        {/* Funds + validity */}
-        <View style={styles.bars}>
-          {remote && details ? (
-            <Bar
-              frac={details.available_balance / (remote.usd_amount ?? details.available_balance)}
-              color="#e8e6e3"
-              label="Balance"
-              value={
-                remote.usd_amount != null
-                  ? `$${details.available_balance.toFixed(2)} of $${remote.usd_amount.toFixed(2)}`
-                  : `$${details.available_balance.toFixed(2)}`
-              }
-            />
-          ) : (
-            <Bar frac={1} color="#e8e6e3" label="Loaded" value={formatUsd(totalWei)} />
-          )}
-          <Bar frac={lifeFrac} color="#7d7d86" label="Valid until" value={expStr} />
-        </View>
-
         {/* Billing address (what to enter when a merchant asks at checkout) */}
         {revealed && details?.billing_address && (
           <>
@@ -165,6 +146,25 @@ export function CardDetailScreen({ order, onBack }: { order: CardOrderRow; onBac
             </View>
           </>
         )}
+
+        {/* Funds + validity */}
+        <View style={styles.bars}>
+          {remote && details ? (
+            <Bar
+              frac={details.available_balance / (remote.usd_amount ?? details.available_balance)}
+              color="#e8e6e3"
+              label="Balance"
+              value={
+                remote.usd_amount != null
+                  ? `$${details.available_balance.toFixed(2)} of $${remote.usd_amount.toFixed(2)}`
+                  : `$${details.available_balance.toFixed(2)}`
+              }
+            />
+          ) : (
+            <Bar frac={1} color="#e8e6e3" label="Loaded" value={formatUsd(totalWei)} />
+          )}
+          <Bar frac={lifeFrac} color="#7d7d86" label="Valid until" value={expStr} />
+        </View>
 
         {/* Transactions */}
         <Text style={styles.section}>Transactions</Text>

@@ -265,11 +265,11 @@ fn eip3009_digest(
     )
 }
 
-/// 18-decimal stablecoin wei -> "25.00" USD string for ?amount=.
+/// 6-decimal USDC base units -> "25.00" USD string for ?amount=.
 pub fn wei_to_usd(v: U256) -> String {
-    let e18 = U256::from(10u64).pow(U256::from(18u64));
-    let whole = v / e18;
-    let cents = (v % e18) / (e18 / U256::from(100u64));
+    let e6 = U256::from(10u64).pow(U256::from(6u64));
+    let whole = v / e6;
+    let cents = (v % e6) / (e6 / U256::from(100u64));
     format!("{whole}.{cents:0>2}")
 }
 

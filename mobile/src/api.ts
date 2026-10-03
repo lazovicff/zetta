@@ -13,7 +13,6 @@ export async function getRecipient(): Promise<bigint> {
   return BigInt(recipient);
 }
 
-/** zDAI balance (wei, 18 decimals) for one pubkey, summed over all its burn addresses. */
 export async function getBalance(pubkeyX: bigint): Promise<bigint> {
   if (!SERVER_URL) {
     throw new Error('EXPO_PUBLIC_SERVER_URL is not set — check mobile/.env');
@@ -136,7 +135,7 @@ export async function getNextCardNonce(pubkeyX: bigint): Promise<number> {
  /** POST /withdraw — debits `amount`; `destination` receives amount − fee. */
  export async function requestWithdraw(req: {
    pubkeyX: bigint;
-   amount: bigint;      // wei, debited
+   amount: bigint;
    destination: string; // 0x + 40 hex
    nonce: number;       // per-user nonce from /next_withdraw_nonce
    sigR: { x: bigint; y: bigint };
@@ -161,8 +160,8 @@ export async function getNextCardNonce(pubkeyX: bigint): Promise<number> {
 
 export interface CardOrderRow {
   provider_ref: string;
-  amount: string; // wei loaded onto the card, decimal
-  fee: string;    // wei, charged on TOP of amount
+  amount: string;
+  fee: string;
   status: 'pending' | 'succeeded' | 'failed' | 'closed';
   created_at: number; // unix seconds
 }
@@ -178,7 +177,7 @@ export async function getCardOrders(pubkeyX: bigint): Promise<CardOrderRow[]> {
 
 export interface WithdrawRow {
   ref: string;
-  amount: string;      // wei debited, decimal (fee comes OUT of this)
+  amount: string;
   destination: string; // 0x…
   status: 'pending' | 'succeeded' | 'failed';
   created_at: number;  // unix seconds

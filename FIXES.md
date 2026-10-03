@@ -1,0 +1,3 @@
+- Create a plan for upgradability
+- Create a plan for secure custody
+- withdraw address private key is not in .env - it should be in keymanager/ enclave

@@ -17,6 +17,12 @@ pub struct Config {
     pub card_fee_bps: u64,
     /// Withdraw fee in basis points, taken out of the requested amount.
     pub withdraw_fee_bps: u64,
+    /// Max unique registered pubkeys; new users are rejected at/above this.
+    pub max_users: i64,
+    /// Max non-failed card orders per user within `card_limit_window_days`.
+    pub max_cards_per_user: i64,
+    /// Rolling window (days) for the per-user card-issuance limit.
+    pub card_limit_window_days: i64,
 }
 
 impl Config {
@@ -37,6 +43,9 @@ impl Config {
             last_block: deployment_block(chain_id, "zERC20")?,
             card_fee_bps: std::env::var("CARD_FEE_BPS")?.parse()?,
             withdraw_fee_bps: std::env::var("WITHDRAW_FEE_BPS")?.parse()?,
+            max_users: std::env::var("MAX_USERS")?.parse()?,
+            max_cards_per_user: std::env::var("MAX_CARDS_PER_USER")?.parse()?,
+            card_limit_window_days: std::env::var("CARD_LIMIT_WINDOW_DAYS")?.parse()?,
         })
     }
 }

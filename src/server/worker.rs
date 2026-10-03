@@ -142,6 +142,7 @@ async fn prepare(
         .try_into()?;
 
     hydrate_registrations(s, db).await?;
+    hydrate_blacklist(s, db).await?;
 
     let events = fetch_transfers(provider, config.token, from_block, latest).await?;
     let base = s.chain.index();
@@ -162,11 +163,11 @@ async fn prepare(
 
     // Replay the proven prefix of the window.
     let mut last_replayed_block = None;
-    for &(blk, to, value) in &events {
+    for &(blk, from, to, value) in &events {
         if s.chain.index() >= proven {
             break;
         }
-        apply_transfer(s, to, value)?;
+        apply_transfer(s, from, to, value)?;
         last_replayed_block = Some(blk);
     }
 
@@ -222,8 +223,8 @@ async fn process(
         }
 
         let mut witnesses = Vec::with_capacity(need);
-        for &(_, to, value) in &events[..need] {
-            witnesses.push(commit_transfer(&mut work, to, value)?);
+        for &(_, from, to, value) in &events[..need] {
+            witnesses.push(commit_transfer(&mut work, from, to, value)?);
         }
         if work.chain.state() != reserved_chain {
             return Err("hash chain diverged from reserved snapshot".into());
@@ -548,6 +549,7 @@ fn withdraw_witnesses(s: &State) -> Option<Vec<WithdrawWitness>> {
 /// Apply one transfer to the working copy, recording the root-step witness.
 fn commit_transfer(
     s: &mut State,
+    from: [u8; 20],
     to: [u8; 20],
     value: Fr,
 ) -> Result<RootTransitionWitness, Box<dyn std::error::Error>> {
@@ -558,7 +560,7 @@ fn commit_transfer(
         value,
         merkle_path,
     };
-    apply_transfer(s, to, value)?;
+    apply_transfer(s, from, to, value)?;
     Ok(witness)
 }
 
@@ -595,12 +597,17 @@ async fn hydrate_registrations(s: &mut State, db: &Db) -> Result<(), Box<dyn std
 /// Replay one proven transfer: tree insert + hash-chain step + ledger entries.
 fn apply_transfer(
     s: &mut State,
+    from: [u8; 20],
     to: [u8; 20],
     value: Fr,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let index = s.tree.len();
     s.tree.insert(poseidon2(address_to_fr(to), value)?);
     s.chain.apply(to, value);
+    if s.blacklist.contains(&from) {
+        warn!(from = %hex::encode(from), to = %hex::encode(to), "blacklisted sender — deposit not credited");
+        return Ok(());
+    }
     *s.credits.entry(to).or_default() += fr_to_u256(value);
     s.deposits.entry(to).or_default().push((value, index));
     Ok(())
@@ -613,7 +620,7 @@ async fn fetch_transfers(
     token: Address,
     from_block: u64,
     to_block: u64,
-) -> Result<Vec<(u64, [u8; 20], Fr)>, Box<dyn std::error::Error>> {
+) -> Result<Vec<(u64, [u8; 20], [u8; 20], Fr)>, Box<dyn std::error::Error>> {
     let mut logs = Vec::new(); // (block, log_index, to, value) until sorted
     let mut from = from_block;
     while from <= to_block {
@@ -632,6 +639,7 @@ async fn fetch_transfers(
             logs.push((
                 log.block_number.ok_or("log without block number")?,
                 log.log_index.ok_or("log without log index")?,
+                d.from.into_array(),
                 d.to.into_array(),
                 u256_to_fr(d.value),
             ));
@@ -639,7 +647,10 @@ async fn fetch_transfers(
         from = to + 1;
     }
     logs.sort_by_key(|e| (e.0, e.1));
-    Ok(logs.into_iter().map(|(b, _, t, v)| (b, t, v)).collect())
+    Ok(logs
+        .into_iter()
+        .map(|(b, _, f, t, v)| (b, f, t, v))
+        .collect())
 }
 
 pub async fn send_and_confirm<F, Fut, E>(
@@ -669,4 +680,10 @@ pub fn log_recipient(state: &SharedState) {
     let s = state.lock().unwrap();
     let r = recipient(s.chain_id, s.exchange_addr, s.tweak);
     info!(stage = "boot", recipient = %r, "exchange recipient");
+}
+
+/// Compliance list; refreshed every tick so edits take effect without restart.
+async fn hydrate_blacklist(s: &mut State, db: &Db) -> Result<(), Box<dyn std::error::Error>> {
+    s.blacklist = db.blacklist().await?.into_iter().collect();
+    Ok(())
 }

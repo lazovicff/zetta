@@ -142,8 +142,9 @@ export function TopUpSheet({
                 </Pressable>
               </View>
               <Text style={styles.note}>
-                This is a one-use deposit address — send funds to it only once. A fresh
-                address is generated for every top up.
+                Send only zUSDC on {network?.name} to this address — any other token will
+                be lost. This is a one-use deposit address — send funds to it only once. A
+                fresh address is generated for every top up.
               </Text>
               <Pressable
                 style={({ pressed }) => [styles.done, pressed && styles.dim]}

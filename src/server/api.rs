@@ -126,11 +126,12 @@ async fn register_inner(app: &AppState, req: RegisterReq) -> Result<(), String> 
     let z = parse_decimal_fq(&req.sig_z)?;
     let salt = parse_decimal_fr(&req.salt)?;
 
-    let (recipient, registered_from) = {
+    let (recipient, registered_from, max_users) = {
         let s = app.state.lock().unwrap();
         (
             recipient(s.chain_id, s.exchange_addr, s.tweak),
             s.chain.index(),
+            s.max_users,
         )
     };
 
@@ -147,6 +148,24 @@ async fn register_inner(app: &AppState, req: RegisterReq) -> Result<(), String> 
     let rhs = (G2::from(r) + G2::from(pk) * e).into_affine();
     if lhs != rhs {
         return Err("bad signature".into());
+    }
+
+    // pubkey is admitted only while unique users < MAX_USERS.
+    if app
+        .db
+        .latest_registration_by_pubkey(pk.x)
+        .await
+        .map_err(|e| e.to_string())?
+        .is_none()
+    {
+        let users = app
+            .db
+            .unique_user_count()
+            .await
+            .map_err(|e| e.to_string())?;
+        if users >= max_users {
+            return Err(format!("user limit reached ({})", max_users));
+        }
     }
 
     let rec = Registration {
@@ -244,9 +263,14 @@ async fn order_card_inner(app: &AppState, req: CardOrderReq) -> Result<serde_jso
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "pubkey not registered".to_string())?;
 
-    let (available, fee_bps) = {
+    let (available, fee_bps, max_cards, window_days) = {
         let s = app.state.lock().unwrap();
-        (available_deposits(&s, pk_x), s.card_fee_bps)
+        (
+            available_deposits(&s, pk_x),
+            s.card_fee_bps,
+            s.max_cards_per_user,
+            s.card_limit_window_days,
+        )
     };
 
     let amount_u256 = fr_to_u256(amount);
@@ -267,6 +291,8 @@ async fn order_card_inner(app: &AppState, req: CardOrderReq) -> Result<serde_jso
             z,
             "laso",
             &provider_ref,
+            max_cards,
+            window_days,
         )
         .await?;
 

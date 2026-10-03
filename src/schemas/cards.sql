@@ -21,7 +21,9 @@ CREATE TABLE IF NOT EXISTS card_orders (
     id_token     text,                    -- Laso bearer for /get-card-data; latest row wins
     refresh_token text,
     created_at   bigint NOT NULL CHECK (created_at > 0),  -- order placed at
-    resolved_at  bigint                   -- this transition's time (NULL for pending)
+    resolved_at  bigint,                   -- this transition's time (NULL for pending)
+    CHECK (status <> 'succeeded'
+               OR (card_id IS NOT NULL AND id_token IS NOT NULL AND refresh_token IS NOT NULL))
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_card_orders_nonce

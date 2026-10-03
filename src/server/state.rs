@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use alloy::primitives::U256;
 use ark_bn254::{Fq, Fr};
@@ -37,6 +37,12 @@ pub struct State {
     /// Registration boundary per burn address: deposits at tree index >= this
     /// are claimable; earlier transfers to the address are treated as burned.
     pub registered_from: HashMap<[u8; 20], u64>,
+    /// Sender addresses whose deposits are never credited (compliance).
+    pub blacklist: HashSet<[u8; 20]>,
+    // User limits.
+    pub max_users: i64,
+    pub max_cards_per_user: i64,
+    pub card_limit_window_days: i64,
 }
 
 impl State {
@@ -61,6 +67,10 @@ impl State {
             card_fee_bps: config.card_fee_bps,
             withdraw_fee_bps: config.withdraw_fee_bps,
             registered_from: HashMap::new(),
+            blacklist: HashSet::new(),
+            max_users: config.max_users,
+            max_cards_per_user: config.max_cards_per_user,
+            card_limit_window_days: config.card_limit_window_days,
         })
     }
 }
