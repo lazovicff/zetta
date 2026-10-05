@@ -1,3 +1,2 @@
 - Create a plan for upgradability
 - Create a plan for secure custody
-- unwrap zUSDC to USDC when paying for a card

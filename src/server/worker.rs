@@ -20,7 +20,7 @@ use crate::config::Config;
 use crate::server::db::{Db, fr_to_u256};
 use crate::server::state::State;
 use crate::server::wallet::Wallet;
-use crate::server::{IToken, IVerifier, SharedState, Transfer, u256_to_fr};
+use crate::server::{IToken, IVault, IVerifier, SharedState, Transfer, u256_to_fr};
 
 use alloy::primitives::B256;
 use ark_bn254::{Bn254, Fq, Fr};
@@ -310,6 +310,8 @@ async fn process(
         submit_withdraws(wallet, provider, config, &work, batch, u256_to_fr(z0_sum)).await?;
     }
 
+    unwrap_after_withdraw(provider, wallet, config).await?;
+
     Ok(())
 }
 
@@ -521,6 +523,30 @@ fn withdraw_witnesses(s: &State) -> Option<Vec<WithdrawWitness>> {
             })
             .collect(),
     )
+}
+
+async fn unwrap_after_withdraw(
+    provider: &impl Provider,
+    wallet: &Wallet,
+    config: &Config,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let exchange = wallet.address();
+    let zbal: U256 = IToken::new(config.token, provider)
+        .balanceOf(exchange)
+        .call()
+        .await?;
+    if zbal.is_zero() {
+        return Ok(());
+    }
+    let vault = IVault::new(config.vault, provider);
+    let call = vault.unwrap(zbal);
+    let rc = send_and_confirm(wallet, provider, config.vault, call.calldata().clone()).await?;
+    if !rc.status() {
+        // Lost a race with a concurrent user unwrap — retry next interval.
+        return Err(format!("unwrap reverted (tx {})", rc.transaction_hash).into());
+    }
+    info!(stage = "unwrap", amount = %zbal, tx = %rc.transaction_hash, "zUSDC -> USDC unwrapped");
+    Ok(())
 }
 
 /// Apply one transfer to the working copy, recording the root-step witness.

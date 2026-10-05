@@ -18,6 +18,7 @@ sol! {
     #[sol(rpc)]
     interface IToken {
         function transfer(address to, uint256 value) external returns (bool);
+        function balanceOf(address) external view returns (uint256);
     }
     event Transfer(address indexed from, address indexed to, uint256 value);
 }
@@ -36,6 +37,14 @@ sol! {
         function updateRootSingle(uint256[2] pA, uint256[2][2] pB, uint256[2] pC, uint256[6] pubSignals) external;
         function withdraw(uint256 chainId, address addr, bytes32 tweak, uint256[34] proof) external;
         function withdrawSingle(uint256 chainId, address addr, bytes32 tweak, uint256[2] pA, uint256[2][2] pB, uint256[2] pC, uint256[4] pubSignals) external;
+    }
+}
+
+sol! {
+    #[sol(rpc)]
+    interface IVault {
+        function usdc() external view returns (address);
+        function unwrap(uint256 amount) external;
     }
 }
 
