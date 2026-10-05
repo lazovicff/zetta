@@ -1,4 +1,4 @@
-import { getDefaultConfig } from "@rainbow-me/rainbowkit";
+import { createConfig } from "@privy-io/wagmi";
 import { defineChain, http } from "viem";
 
 export const anvil = defineChain({
@@ -8,11 +8,7 @@ export const anvil = defineChain({
   rpcUrls: { default: { http: ["http://localhost:8545"] } },
 });
 
-export const config = getDefaultConfig({
-  appName: "Zetta USDC",
-  projectId: process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID ?? "",
+export const config = createConfig({
   chains: [anvil],
-  transports: {
-    [anvil.id]: http(),
-  },
+  transports: { [anvil.id]: http() },
 });

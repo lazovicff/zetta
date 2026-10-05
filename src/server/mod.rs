@@ -2,6 +2,7 @@ pub mod api;
 pub mod db;
 pub mod laso;
 pub mod state;
+pub mod wallet;
 pub mod worker;
 
 use crate::server::db::Db;
@@ -55,17 +56,6 @@ fn u256_to_fr(v: U256) -> Fr {
 
 fn fq_to_u256(x: Fq) -> U256 {
     U256::from_be_slice(&crate::server::db::fr_to_blob(x))
-}
-
-fn decode_opaque_proof<const N: usize>(calldata: &[u8]) -> [U256; N] {
-    let mut out = [U256::ZERO; N];
-    for (i, slot) in out.iter_mut().enumerate() {
-        let start = 4 + i * 32;
-        let mut b = [0u8; 32];
-        b.copy_from_slice(&calldata[start..start + 32]);
-        *slot = U256::from_be_bytes(b);
-    }
-    out
 }
 
 fn parse_hex20(s: &str) -> Result<[u8; 20], String> {

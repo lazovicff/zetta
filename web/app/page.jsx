@@ -1,4 +1,4 @@
-import { ConnectButton } from "@rainbow-me/rainbowkit";
+import { ConnectButton } from "@/components/ConnectButton";
 import { Tabs } from "@/components/Tabs";
 
 export default function Home() {

@@ -51,6 +51,7 @@ folding-schemes = { git = "https://github.com/kbizikav/sonobe", rev = "9f201b8b7
 solidity-verifiers = { git = "https://github.com/kbizikav/sonobe", rev = "9f201b8b77eed8dfdb464304d3a4d624b5f5f2dd", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+privy-rs = "=0.1.0-alpha.6"
 
 
 [patch.crates-io]

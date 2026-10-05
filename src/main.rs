@@ -1,10 +1,10 @@
 use alloy::providers::{Provider, ProviderBuilder};
-use alloy::signers::local::PrivateKeySigner;
 use std::sync::{Arc, Mutex};
 
 use zetta::config::Config;
 use zetta::server::db::Db;
 use zetta::server::state::State;
+use zetta::server::wallet::Wallet;
 use zetta::server::{AppState, SharedState, api, worker};
 
 #[tokio::main]
@@ -16,7 +16,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    // ---- boot once: config, params, signer, state, db ----
     tracing::info!(stage = "boot", "loading config");
     let config = Config::from_env()?;
 
@@ -28,12 +27,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     zetta::zkp::cached_single_withdraw_params()?;
     tracing::info!(stage = "boot", elapsed = ?t.elapsed(), "proving params loaded");
 
-    let signer: PrivateKeySigner = config.private_key.parse()?;
-    let exchange_addr = signer.address().into_array();
-    let laso = zetta::server::laso::LasoClient::new(&config.laso_url, signer.clone());
-    let provider = ProviderBuilder::new()
-        .wallet(signer)
-        .connect_http(config.rpc_url.parse()?);
+    let wallet = Wallet::new(
+        &config.privy_app_id,
+        &config.privy_app_secret,
+        &config.privy_wallet_id,
+        config.wallet_address,
+        config.chain_id,
+    )?;
+    tracing::info!(stage = "boot", address = %wallet.address(), "operator wallet (privy)");
+    let exchange_addr = wallet.address().into_array();
+    let laso = zetta::server::laso::LasoClient::new(&config.laso_url, wallet.clone());
+    // Read-only provider; every send/sign goes through the Privy wallet.
+    let provider = ProviderBuilder::new().connect_http(config.rpc_url.parse()?);
 
     let state: SharedState = Arc::new(Mutex::new(State::new(
         &config,
@@ -44,7 +49,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(stage = "boot", "database connected");
     worker::log_recipient(&state);
 
-    // ---- HTTP API: bind fatal, spawn once, never restarted ----
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", config.port))
         .await
         .map_err(|e| {
@@ -64,7 +68,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     tracing::info!(stage = "boot", port = config.port, "HTTP server bound");
 
-    // Worker loop: per interval — prepare (catch up to proven state) →
-    // reserve → process (updateRoot + withdraws); payouts run isolated.
-    worker::run(&state, &provider, &config, &db).await
+    worker::run(&state, &provider, &wallet, &config, &db).await
 }

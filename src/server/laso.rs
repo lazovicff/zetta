@@ -4,17 +4,17 @@
 //! settling on-chain; prod points it at https://laso.finance. Same code path.
 
 use alloy::primitives::{Address, B256, U256, keccak256};
-use alloy::signers::Signer;
-use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolValue;
 use serde_json::{Value, json};
+
+use crate::server::wallet::Wallet;
 
 #[derive(Clone)]
 pub struct LasoClient {
     base: String,
     http: reqwest::Client,
     /// Operator wallet — pays every card order.
-    signer: PrivateKeySigner,
+    wallet: Wallet,
 }
 
 pub struct LasoAuth {
@@ -28,11 +28,11 @@ pub struct LasoOrder {
 }
 
 impl LasoClient {
-    pub fn new(base: &str, signer: PrivateKeySigner) -> Self {
+    pub fn new(base: &str, wallet: Wallet) -> Self {
         Self {
             base: base.trim_end_matches('/').to_string(),
             http: reqwest::Client::new(),
-            signer,
+            wallet,
         }
     }
 
@@ -118,7 +118,7 @@ impl LasoClient {
 
     /// GET /auth with SIGN-IN-WITH-X (CAIP-122), EIP-191 signed by the operator wallet.
     pub async fn auth(&self) -> Result<LasoAuth, String> {
-        let address = self.signer.address();
+        let address = self.wallet.address();
         let host = self
             .base
             .trim_start_matches("http://")
@@ -130,13 +130,13 @@ impl LasoClient {
             self.base
         );
         let sig = self
-            .signer
+            .wallet
             .sign_message(message.as_bytes())
             .await
             .map_err(|e| e.to_string())?;
         let envelope = json!({
             "message": message,
-            "signature": sig.to_string(),
+            "signature": sig,
             "address": address.to_string(),
         });
         let res = self
@@ -183,7 +183,7 @@ impl LasoClient {
             version,
             chain_id,
             asset,
-            self.signer.address(),
+            self.wallet.address(),
             pay_to,
             value,
             valid_after,
@@ -191,7 +191,7 @@ impl LasoClient {
             nonce,
         );
         let sig = self
-            .signer
+            .wallet
             .sign_hash(&digest)
             .await
             .map_err(|e| e.to_string())?;
@@ -199,9 +199,9 @@ impl LasoClient {
             "x402Version": 2,
             "accepted": accept,
             "payload": {
-                "signature": sig.to_string(),
+                "signature": sig,
                 "authorization": {
-                    "from": self.signer.address(),
+                    "from": self.wallet.address(),
                     "to": pay_to,
                     "value": value.to_string(),
                     "validAfter": "0",

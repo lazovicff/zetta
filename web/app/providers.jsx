@@ -1,19 +1,19 @@
 "use client";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { WagmiProvider } from "wagmi";
-import { RainbowKitProvider } from "@rainbow-me/rainbowkit";
+import { PrivyProvider } from "@privy-io/react-auth";
+import { WagmiProvider } from "@privy-io/wagmi";
 import { config } from "@/config/wagmi";
-import "@rainbow-me/rainbowkit/styles.css";
+import { privyConfig } from "@/config/privy";
 
 const queryClient = new QueryClient();
 
 export function Providers({ children }) {
   return (
-    <WagmiProvider config={config}>
+    <PrivyProvider appId={process.env.NEXT_PUBLIC_PRIVY_APP_ID} config={privyConfig}>
       <QueryClientProvider client={queryClient}>
-        <RainbowKitProvider>{children}</RainbowKitProvider>
+        <WagmiProvider config={config}>{children}</WagmiProvider>
       </QueryClientProvider>
-    </WagmiProvider>
+    </PrivyProvider>
   );
 }

@@ -19,6 +19,7 @@ use crate::burn::{address_to_fr, recipient};
 use crate::config::Config;
 use crate::server::db::{Db, fr_to_u256};
 use crate::server::state::State;
+use crate::server::wallet::Wallet;
 use crate::server::{IToken, IVerifier, SharedState, Transfer, u256_to_fr};
 
 use alloy::primitives::B256;
@@ -26,7 +27,7 @@ use ark_bn254::{Bn254, Fq, Fr};
 use ark_ff::Zero; // replace `use ark_bn254::Fr;` with the line above
 use std::time::Instant;
 
-use crate::server::{decode_opaque_proof, fq_to_u256};
+use crate::server::fq_to_u256;
 use crate::tree::TREE_DEPTH;
 use crate::zkp::{
     RootTransitionCircuit, RootTransitionWitness, SingleRootTransitionCircuit,
@@ -50,16 +51,17 @@ pub struct Prepared {
 pub async fn run(
     state: &SharedState,
     provider: &impl Provider,
+    wallet: &Wallet,
     config: &Config,
     db: &Db,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Boot: full replay from the deployment block; afterwards incremental.
     let mut last_block = config.last_block;
     loop {
-        if let Err(e) = tick(state, provider, config, db, &mut last_block).await {
+        if let Err(e) = tick(state, provider, wallet, config, db, &mut last_block).await {
             warn!(error = %e, "tick failed");
         }
-        if let Err(e) = payouts(provider, config, db).await {
+        if let Err(e) = payouts(provider, wallet, config, db).await {
             warn!(stage = "payout", error = %e, "phase 3 failed");
         }
         tokio::time::sleep(Duration::from_secs(config.poll_interval_secs)).await;
@@ -70,6 +72,7 @@ pub async fn run(
 async fn tick(
     state: &SharedState,
     provider: &impl Provider,
+    wallet: &Wallet,
     config: &Config,
     db: &Db,
     last_block: &mut u64,
@@ -89,22 +92,20 @@ async fn tick(
     *state.lock().unwrap() = next;
 
     // Phase 2: reserve at the tip, then process the fresh chunk.
-    reserve(provider, config).await?;
-    process(state, provider, config, *last_block).await
+    reserve(provider, wallet, config).await?;
+    process(state, provider, wallet, config, *last_block).await
 }
 
 /// Step 0 — pin the epoch target on-chain BEFORE the phase-1 snapshot, so the
 /// snapshot's transfer window provably covers everything up to the reservation.
 async fn reserve(
     provider: &impl Provider,
+    wallet: &Wallet,
     config: &Config,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let verifier = IVerifier::new(config.verifier, provider);
-    let rc = send_and_confirm(|| {
-        let c = verifier.clone();
-        async move { c.reserveHashChain().send().await }
-    })
-    .await?;
+    let call = verifier.reserveHashChain();
+    let rc = send_and_confirm(wallet, provider, config.verifier, call.calldata().clone()).await?;
     debug!(stage = "reserve", tx = %rc.transaction_hash, "hash chain reserved");
     Ok(())
 }
@@ -195,6 +196,7 @@ async fn prepare(
 async fn process(
     state: &SharedState,
     provider: &impl Provider,
+    wallet: &Wallet,
     config: &Config,
     from_block: u64, // last prepared block; events after it start at `proven`
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -238,6 +240,7 @@ async fn process(
                 work.tree.root(),
             ];
             submit_single_update_root(
+                wallet,
                 provider,
                 config,
                 z_0,
@@ -246,7 +249,7 @@ async fn process(
             )
             .await?;
         } else {
-            submit_update_root(provider, config, z_0, witnesses).await?;
+            submit_update_root(wallet, provider, config, z_0, witnesses).await?;
         }
     }
 
@@ -295,9 +298,16 @@ async fn process(
     let batch: Vec<WithdrawWitness> = witnesses[k..].to_vec();
     if batch.len() == 1 {
         // Reachable only when totalWithdrawn == 0, so the value IS the sum.
-        submit_single_withdraw(provider, config, &work, batch.into_iter().next().unwrap()).await?;
+        submit_single_withdraw(
+            wallet,
+            provider,
+            config,
+            &work,
+            batch.into_iter().next().unwrap(),
+        )
+        .await?;
     } else {
-        submit_withdraws(provider, config, &work, batch, u256_to_fr(z0_sum)).await?;
+        submit_withdraws(wallet, provider, config, &work, batch, u256_to_fr(z0_sum)).await?;
     }
 
     Ok(())
@@ -308,6 +318,7 @@ async fn process(
 /// the exchange key.
 async fn payouts(
     provider: &impl Provider,
+    wallet: &Wallet,
     config: &Config,
     db: &Db,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -325,15 +336,8 @@ async fn payouts(
     for w in pendings {
         let payout = w.amount;
         let ref_ = w.ref_.clone();
-        let res = send_and_confirm(|| {
-            let t = token.clone();
-            async move {
-                t.transfer(Address::from(w.destination), payout)
-                    .send()
-                    .await
-            }
-        })
-        .await;
+        let call = token.transfer(Address::from(w.destination), payout);
+        let res = send_and_confirm(wallet, provider, config.token, call.calldata().clone()).await;
         match res {
             Ok(rc) if rc.status() => {
                 db.settle_withdraw(&ref_, "succeeded", Some(rc.transaction_hash.0), None)
@@ -359,6 +363,7 @@ async fn payouts(
 
 /// Single-leaf epoch — Groth16 (the Nova decider needs >= 2 steps).
 async fn submit_single_update_root(
+    wallet: &Wallet,
     provider: &impl Provider,
     config: &Config,
     z_0: [Fr; 3],
@@ -378,17 +383,15 @@ async fn submit_single_update_root(
         fr_to_u256(z_1[2]),
     ];
     let verifier = IVerifier::new(config.verifier, provider);
-    let rc = send_and_confirm(|| {
-        let c_ = verifier.clone();
-        async move { c_.updateRootSingle(a, b, c, signals).send().await }
-    })
-    .await?;
+    let call = verifier.updateRootSingle(a, b, c, signals);
+    let rc = send_and_confirm(wallet, provider, config.verifier, call.calldata().clone()).await?;
     info!(stage = "commit", tx = %rc.transaction_hash, gas = rc.gas_used, "updateRootSingle confirmed");
     Ok(())
 }
 
 /// Multi-leaf epoch — Nova IVC folded per transfer + Groth16 decider.
 async fn submit_update_root(
+    wallet: &Wallet,
     provider: &impl Provider,
     config: &Config,
     z_0: Vec<Fr>,
@@ -402,13 +405,7 @@ async fn submit_update_root(
     let t = Instant::now();
     let calldata = prove_root_transition(RootTransitionCircuit::new(())?, z_0, witnesses)?;
     info!(stage = "commit", elapsed = ?t.elapsed(), "root proof done");
-    let proof = decode_opaque_proof::<32>(&calldata);
-    let verifier = IVerifier::new(config.verifier, provider);
-    let rc = send_and_confirm(|| {
-        let c_ = verifier.clone();
-        async move { c_.updateRoot(proof).send().await }
-    })
-    .await?;
+    let rc = send_and_confirm(wallet, provider, config.verifier, calldata.clone().into()).await?;
     info!(stage = "commit", tx = %rc.transaction_hash, gas = rc.gas_used, "updateRoot confirmed");
     Ok(())
 }
@@ -416,6 +413,7 @@ async fn submit_update_root(
 /// First-ever withdraw of a recipient namespace (totalWithdrawn == 0): a
 /// Groth16 proof over the single receipt whose value IS the lifetime sum.
 async fn submit_single_withdraw(
+    wallet: &Wallet,
     provider: &impl Provider,
     config: &Config,
     work: &State,
@@ -443,23 +441,16 @@ async fn submit_single_withdraw(
         fr_to_u256(value),
     ];
     let verifier = IVerifier::new(config.verifier, provider);
-    let rc = send_and_confirm(|| {
-        let c_ = verifier.clone();
-        async move {
-            c_.withdrawSingle(
-                U256::from(work.chain_id),
-                Address::from(work.exchange_addr),
-                B256::from(work.tweak),
-                a,
-                b,
-                c,
-                signals,
-            )
-            .send()
-            .await
-        }
-    })
-    .await?;
+    let call = verifier.withdrawSingle(
+        U256::from(work.chain_id),
+        Address::from(work.exchange_addr),
+        B256::from(work.tweak),
+        a,
+        b,
+        c,
+        signals,
+    );
+    let rc = send_and_confirm(wallet, provider, config.verifier, call.calldata().clone()).await?;
     info!(stage = "withdraw", tx = %rc.transaction_hash, gas = rc.gas_used, "withdrawSingle confirmed");
     Ok(())
 }
@@ -468,6 +459,7 @@ async fn submit_single_withdraw(
 /// at cumulative base `z0_sum` (the already-withdrawn prefix sum), so the
 /// contract mints exactly Σ witnesses on top of totalWithdrawn.
 async fn submit_withdraws(
+    wallet: &Wallet,
     provider: &impl Provider,
     config: &Config,
     work: &State,
@@ -482,22 +474,7 @@ async fn submit_withdraws(
     let recip = recipient(work.chain_id, work.exchange_addr, work.tweak);
     let z_0 = vec![Fr::zero(), z0_sum, work.tree.root(), recip];
     let calldata = prove_withdraw(WithdrawCircuit::new(())?, z_0, witnesses)?;
-    let proof = decode_opaque_proof::<34>(&calldata);
-    let verifier = IVerifier::new(config.verifier, provider);
-    let rc = send_and_confirm(|| {
-        let c_ = verifier.clone();
-        async move {
-            c_.withdraw(
-                U256::from(work.chain_id),
-                Address::from(work.exchange_addr),
-                B256::from(work.tweak),
-                proof,
-            )
-            .send()
-            .await
-        }
-    })
-    .await?;
+    let rc = send_and_confirm(wallet, provider, config.verifier, calldata.clone().into()).await?;
     info!(stage = "withdraw", tx = %rc.transaction_hash, gas = rc.gas_used, "withdraw confirmed");
     Ok(())
 }
@@ -653,27 +630,20 @@ async fn fetch_transfers(
         .collect())
 }
 
-pub async fn send_and_confirm<F, Fut, E>(
-    send: F,
-) -> Result<alloy::rpc::types::TransactionReceipt, Box<dyn std::error::Error>>
-where
-    F: Fn() -> Fut,
-    Fut: std::future::Future<
-            Output = Result<
-                alloy::providers::PendingTransactionBuilder<alloy::network::Ethereum>,
-                E,
-            >,
-        >,
-    E: ToString + std::error::Error + 'static,
-{
-    match send().await {
-        Ok(p) => Ok(p.get_receipt().await?),
-        Err(e) if e.to_string().contains("-32003") => {
-            warn!(stage = "tx", "nonce too low — retrying with fresh nonce");
-            Ok(send().await?.get_receipt().await?)
+pub async fn send_and_confirm(
+    wallet: &Wallet,
+    provider: &impl Provider,
+    to: Address,
+    data: alloy::primitives::Bytes,
+) -> Result<alloy::rpc::types::TransactionReceipt, Box<dyn std::error::Error>> {
+    let hash = wallet.send_tx(to, data).await?;
+    for _ in 0..180 {
+        if let Some(rc) = provider.get_transaction_receipt(hash).await? {
+            return Ok(rc);
         }
-        Err(e) => Err(e.to_string().into()),
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
+    Err(format!("tx {hash} not mined after 180s").into())
 }
 
 pub fn log_recipient(state: &SharedState) {
