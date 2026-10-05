@@ -20,7 +20,7 @@ use crate::config::Config;
 use crate::server::db::{Db, fr_to_u256};
 use crate::server::state::State;
 use crate::server::wallet::Wallet;
-use crate::server::{IToken, IVault, IVerifier, SharedState, Transfer, u256_to_fr};
+use crate::server::{BurnStep, IToken, IVault, IVerifier, SharedState, u256_to_fr};
 
 use alloy::primitives::B256;
 use ark_bn254::{Bn254, Fq, Fr};
@@ -58,42 +58,30 @@ pub async fn run(
     // Boot: full replay from the deployment block; afterwards incremental.
     let mut last_block = config.last_block;
     loop {
-        if let Err(e) = tick(state, provider, wallet, config, db, &mut last_block).await {
-            warn!(error = %e, "tick failed");
+        // Phase 1: catch the mirror up to the finalized prefix [0..transferIndex).
+        let mut next = state.lock().unwrap().clone(); // shared slot untouched on failure
+        let p = prepare(&mut next, provider, config, db, last_block).await?;
+        if let Some(b) = p.last_replayed_block {
+            last_block = b;
         }
+        debug!(
+            stage = "prepare",
+            proven = p.proven,
+            block = p.latest_block,
+            "caught up"
+        );
+        *state.lock().unwrap() = next;
+
+        // Phase 2: reserve at the tip, then process the fresh chunk.
+        reserve(provider, wallet, config).await?;
+        process(state, provider, wallet, config, last_block).await?;
+
+        // Phase 3: run payouts separately.
         if let Err(e) = payouts(provider, wallet, config, db).await {
             warn!(stage = "payout", error = %e, "phase 3 failed");
         }
         tokio::time::sleep(Duration::from_secs(config.poll_interval_secs)).await;
     }
-}
-
-/// One interval: prepare → reserve → process. Payouts run separately in run().
-async fn tick(
-    state: &SharedState,
-    provider: &impl Provider,
-    wallet: &Wallet,
-    config: &Config,
-    db: &Db,
-    last_block: &mut u64,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Phase 1: catch the mirror up to the finalized prefix [0..transferIndex).
-    let mut next = state.lock().unwrap().clone(); // shared slot untouched on failure
-    let p = prepare(&mut next, provider, config, db, *last_block + 1).await?;
-    if let Some(b) = p.last_replayed_block {
-        *last_block = b;
-    }
-    debug!(
-        stage = "prepare",
-        proven = p.proven,
-        block = p.latest_block,
-        "caught up"
-    );
-    *state.lock().unwrap() = next;
-
-    // Phase 2: reserve at the tip, then process the fresh chunk.
-    reserve(provider, wallet, config).await?;
-    process(state, provider, wallet, config, *last_block).await
 }
 
 /// Step 0 — pin the epoch target on-chain BEFORE the phase-1 snapshot, so the
@@ -135,55 +123,31 @@ async fn prepare(
         .try_into()?;
     let on_chain_root = u256_to_fr(verifier.transferRoot().block(block).call().await?);
     let on_chain_chain = u256_to_fr(verifier.transferHashChain().block(block).call().await?);
-    let reserved_index: u64 = verifier
-        .reservedIndex()
-        .block(block)
-        .call()
-        .await?
-        .try_into()?;
 
     hydrate_registrations(s, db).await?;
     hydrate_blacklist(s, db).await?;
 
-    let events = fetch_transfers(provider, config.token, from_block, latest).await?;
-    let base = s.chain.index();
-    if proven < base || base + events.len() as u64 <= proven.saturating_sub(1) {
+    let events = fetch_chain_events(provider, config.token, from_block, latest).await?;
+    let target_block = sync_chain(&mut *s, &events, on_chain_chain, &mut apply_transfer)?;
+
+    if s.chain.index() != proven {
         return Err(format!(
-            "window from block {from_block} can't cover proven index {proven} (base {base}, {} events)",
-            events.len()
+            "chain value reached at index {} but proven is {proven} (chain/root disagreement?)",
+            s.chain.index()
         )
         .into());
     }
-    if reserved_index < proven || reserved_index > base + events.len() as u64 {
+    if s.tree.root() != on_chain_root {
         return Err(format!(
-            "reservation [{proven}..{reserved_index}] outside window (base {base}, {} events)",
-            events.len()
-        )
-        .into());
-    }
-
-    // Replay the proven prefix of the window.
-    let mut last_replayed_block = None;
-    for &(blk, from, to, value) in &events {
-        if s.chain.index() >= proven {
-            break;
-        }
-        apply_transfer(s, from, to, value)?;
-        last_replayed_block = Some(blk);
-    }
-
-    if s.tree.root() != on_chain_root || s.chain.state() != on_chain_chain {
-        return Err(format!(
-            "local mirror diverged from contract: root {} vs {on_chain_root}, chain {} vs {on_chain_chain}",
-            s.tree.root(),
-            s.chain.state(),
+            "local mirror diverged from contract: root {} vs {on_chain_root}",
+            s.tree.root()
         )
         .into());
     }
 
     Ok(Prepared {
         proven,
-        last_replayed_block,
+        last_replayed_block: target_block,
         latest_block: latest,
     })
 }
@@ -210,26 +174,27 @@ async fn process(
 
     if reserved_index > proven {
         let z_0 = vec![Fr::from(proven), work.chain.state(), work.tree.root()];
-        let need = (reserved_index - proven) as usize;
 
-        // Fetched AFTER the reserve mined, so head >= reserve block and the
-        // window provably contains all `need` events.
+        // Fetched AFTER the reserve mined, so the window contains the reserved
+        // chain value; the walk stops exactly at it — including mid-block.
         let latest = provider.get_block_number().await?;
-        let events = fetch_transfers(provider, config.token, from_block + 1, latest).await?;
-        if events.len() < need {
+        let events = fetch_chain_events(provider, config.token, from_block, latest).await?;
+        let mut witnesses = Vec::new();
+        sync_chain(
+            &mut work,
+            &events,
+            reserved_chain,
+            &mut |s, from, to, value| {
+                witnesses.push(commit_transfer(s, from, to, value)?);
+                Ok(())
+            },
+        )?;
+        if work.chain.index() != reserved_index {
             return Err(format!(
-                "need {need} epoch transfers from block {from_block}, found {}",
-                events.len()
+                "reserved chain reached at index {} but reservedIndex is {reserved_index}",
+                work.chain.index()
             )
             .into());
-        }
-
-        let mut witnesses = Vec::with_capacity(need);
-        for &(_, from, to, value) in &events[..need] {
-            witnesses.push(commit_transfer(&mut work, from, to, value)?);
-        }
-        if work.chain.state() != reserved_chain {
-            return Err("hash chain diverged from reserved snapshot".into());
         }
 
         if witnesses.len() == 1 {
@@ -616,35 +581,34 @@ fn apply_transfer(
     Ok(())
 }
 
-/// Every Transfer in [from_block, to_block], ordered by (block, log index);
-/// mints/burns excluded, matching the on-chain hash-chain rule.
-async fn fetch_transfers(
+/// Every BurnStep in [from_block, to_block] inclusive, ordered by
+/// (block, log index). The carried chain value makes windows self-verifying
+/// and exact-cut.
+async fn fetch_chain_events(
     provider: &impl Provider,
     token: Address,
     from_block: u64,
     to_block: u64,
-) -> Result<Vec<(u64, [u8; 20], [u8; 20], Fr)>, Box<dyn std::error::Error>> {
-    let mut logs = Vec::new(); // (block, log_index, to, value) until sorted
+) -> Result<Vec<(u64, [u8; 20], [u8; 20], Fr, Fr)>, Box<dyn std::error::Error>> {
+    let mut logs = Vec::new(); // (block, log_index, ...) until sorted
     let mut from = from_block;
     while from <= to_block {
         let to = (from + LOG_CHUNK - 1).min(to_block);
         let filter = Filter::new()
             .address(token)
-            .event_signature(Transfer::SIGNATURE_HASH)
+            .event_signature(BurnStep::SIGNATURE_HASH)
             .from_block(from)
             .to_block(to);
         for log in provider.get_logs(&filter).await? {
-            let decoded = log.log_decode::<Transfer>()?;
+            let decoded = log.log_decode::<BurnStep>()?;
             let d = decoded.data();
-            if d.from == Address::ZERO || d.to == Address::ZERO {
-                continue;
-            }
             logs.push((
                 log.block_number.ok_or("log without block number")?,
                 log.log_index.ok_or("log without log index")?,
                 d.from.into_array(),
                 d.to.into_array(),
                 u256_to_fr(d.value),
+                u256_to_fr(d.hashChain),
             ));
         }
         from = to + 1;
@@ -652,8 +616,44 @@ async fn fetch_transfers(
     logs.sort_by_key(|e| (e.0, e.1));
     Ok(logs
         .into_iter()
-        .map(|(b, _, f, t, v)| (b, f, t, v))
+        .map(|(b, _, f, t, v, h)| (b, f, t, v, h))
         .collect())
+}
+
+/// Advance the mirror along `events` until its hash chain equals `target`.
+/// Position is recovered by chain value, so `events` may overlap history.
+/// Returns the block of the target-carrying event, or None if already at target.
+fn sync_chain(
+    s: &mut State,
+    events: &[(u64, [u8; 20], [u8; 20], Fr, Fr)],
+    target: Fr,
+    apply: &mut impl FnMut(&mut State, [u8; 20], [u8; 20], Fr) -> Result<(), Box<dyn std::error::Error>>,
+) -> Result<Option<u64>, Box<dyn std::error::Error>> {
+    if s.chain.state() == target {
+        return Ok(None); // already at the frontier
+    }
+    let mut synced = s.chain.state().is_zero(); // genesis: start from the first event
+    for &(blk, from, to, value, carried) in events {
+        if !synced {
+            synced = carried == s.chain.state();
+            continue; // skip up to and including the sync event
+        }
+        apply(s, from, to, value)?;
+        if s.chain.state() != carried {
+            return Err(format!(
+                "chain mismatch at block {blk}: mirror out of sync (gap or reorg)"
+            )
+            .into());
+        }
+        if carried == target {
+            return Ok(Some(blk));
+        }
+    }
+    Err(if synced {
+        format!("target chain value {target} not in window").into()
+    } else {
+        "sync point not in window: stale cursor or reorg".into()
+    })
 }
 
 pub async fn send_and_confirm(

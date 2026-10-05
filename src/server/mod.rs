@@ -21,6 +21,7 @@ sol! {
         function balanceOf(address) external view returns (uint256);
     }
     event Transfer(address indexed from, address indexed to, uint256 value);
+    event BurnStep(address indexed from, address indexed to, uint256 value, uint256 hashChain);
 }
 
 sol! {

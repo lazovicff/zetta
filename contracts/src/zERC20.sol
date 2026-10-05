@@ -13,6 +13,8 @@ contract zERC20 is ERC20 {
     address public minter;   // the Vault (wrap/unwrap)
     address public verifier; // the Verifier (teleport)
 
+    event BurnStep(address indexed from, address indexed to, uint256 value, uint256 hashChain);
+
     constructor(string memory name_, string memory symbol_) ERC20(name_, symbol_) {
         minter = msg.sender;
         verifier = msg.sender;
@@ -49,6 +51,7 @@ contract zERC20 is ERC20 {
         if (from != address(0) && to != address(0)) {
             burnHashChain = PoseidonT4.hash([burnHashChain, uint256(uint160(to)), value]);
             burnIndex += 1;
+            emit BurnStep(from, to, value, burnHashChain);
         }
     }
 }

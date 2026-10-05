@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
 import {zERC20} from "../src/zERC20.sol";
+import {PoseidonT4} from "poseidon-solidity/PoseidonT4.sol";
 
 contract zERC20Test is Test {
     zERC20 token;
@@ -74,5 +75,13 @@ contract zERC20Test is Test {
         vm.prank(alice);
         vm.expectRevert("not verifier");
         token.teleport(bob, 100 ether);
+    }
+
+    function test_burn_step_event() public {
+        uint256 chain = PoseidonT4.hash([uint256(0), uint256(uint160(bob)), 100 ether]);
+        vm.expectEmit(true, true, false, true, address(token));
+        emit zERC20.BurnStep(alice, bob, 100 ether, chain);
+        vm.prank(alice);
+        token.transfer(bob, 100 ether);
     }
 }
