@@ -109,4 +109,28 @@ impl Wallet {
             other => Err(format!("unexpected rpc response: {other:?}").into()),
         }
     }
+
+    /// Broadcast a contract-creation tx; returns the tx hash once relayed.
+    pub async fn deploy_tx(&self, initcode: Bytes) -> Result<B256, Box<dyn std::error::Error>> {
+        let ctx = AuthorizationContext::new();
+        let tx = UnsignedStandardEthereumTransaction {
+            to: None, // contract creation
+            data: Some(Hex::try_from(format!("0x{}", hex::encode(&initcode)))?),
+            chain_id: Some(Quantity::Integer(self.chain_id as i64)),
+            ..Default::default()
+        };
+        let r = self
+            .client
+            .wallets()
+            .ethereum()
+            .send_transaction(&self.wallet_id, &self.caip2, tx.into(), &ctx, None)
+            .await?
+            .into_inner();
+        match r {
+            WalletRpcResponse::EthereumSendTransactionRpcResponse(resp) => {
+                Ok(String::from(resp.data.hash).parse()?)
+            }
+            other => Err(format!("unexpected rpc response: {other:?}").into()),
+        }
+    }
 }
