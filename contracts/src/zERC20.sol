@@ -13,21 +13,42 @@ contract zERC20 is ERC20 {
     address public minter;   // the Vault (wrap/unwrap)
     address public verifier; // the Verifier (teleport)
 
+    address public owner; // Cold wallet / multisig
+    address public pendingOwner; // 2-step: fat-finger protection
+
     event BurnStep(address indexed from, address indexed to, uint256 value, uint256 hashChain);
+    event MinterRotated(address indexed oldMinter, address indexed newMinter);
+    event VerifierRotated(address indexed oldVerifier, address indexed newVerifier);
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "not owner");
+        _;
+    }
 
     constructor(string memory name_, string memory symbol_) ERC20(name_, symbol_) {
         minter = msg.sender;
         verifier = msg.sender;
+        owner = msg.sender;
     }
 
-    function setMinter(address newMinter) external {
-        require(msg.sender == minter, "not minter");
-        minter = newMinter;
+    function setMinter(address m) external onlyOwner {
+        emit MinterRotated(minter, m);
+        minter = m;
     }
 
-    function setVerifier(address newVerifier) external {
-        require(msg.sender == verifier, "not verifier");
-        verifier = newVerifier;
+    function setVerifier(address v) external onlyOwner {
+        emit VerifierRotated(verifier, v);
+        verifier = v;
+    }
+
+    function transferOwnership(address newOwner) external onlyOwner {
+        pendingOwner = newOwner;
+    }
+
+    function acceptOwnership() external {
+        require(msg.sender == pendingOwner, "not pending owner");
+        pendingOwner = address(0);
+        owner = msg.sender;
     }
 
     function mint(address to, uint256 amount) external {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {zERC20} from "./zERC20.sol";
+import {zERC20} from "../src/zERC20.sol";
 
 interface IRootTransitionVerifier {
     function verifyOpaqueNovaProof(uint256[32] calldata proof) external view returns (bool);

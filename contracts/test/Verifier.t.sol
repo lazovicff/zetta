@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, stdStorage, StdStorage} from "forge-std/Test.sol";
 import {zERC20} from "../src/zERC20.sol";
 import {
     Verifier,
@@ -70,6 +70,8 @@ contract MockSingleRootTransitionVerifier is ISingleRootTransitionVerifier {
 }
 
 contract VerifierTest is Test {
+    using stdStorage for StdStorage;
+
     zERC20 token;
     Verifier verifier;
     MockRootVerifier rootV;
