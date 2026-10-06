@@ -29,18 +29,29 @@ interface ISingleWithdrawVerifier {
     ) external view returns (bool);
 }
 
+/// One verifier = one tree (depth 32). On rollover a new Verifier is deployed:
+/// tree state restarts (empty root, tree-local index 0) while the token's hash
+/// chain continues from the previous generation's frozen frontier.
 contract Verifier {
     zERC20 public token;
 
-    // Single ever-growing tree (depth 32). Frontier = state proven on-chain.
+    /// Previous generation (address(0) at genesis).
+    Verifier public immutable prev;
+    /// Global token burnIndex at which this tree's local index 0 starts.
+    uint256 public treeStart;
+
+    // This generation's tree. Frontier = state proven on-chain.
     uint256 public transferRoot;
-    uint256 public transferIndex;      // leaves folded into transferRoot
-    uint256 public transferHashChain;
+    uint256 public transferIndex;      // tree-local: leaves folded into transferRoot
+    uint256 public transferHashChain;  // global chain value, continuous across generations
 
     uint256 public reservedHashChain;
-    uint256 public reservedIndex;
+    uint256 public reservedIndex;      // tree-local
 
-    mapping(uint256 => uint256) public totalWithdrawn; // recipient => lifetime sum already minted
+    mapping(uint256 => uint256) public totalWithdrawn; // recipient => sum minted (this tree)
+
+    // Legacy: claims against prev's frozen tree, settled by this contract.
+    mapping(uint256 => uint256) public legacyWithdrawn; // recipient => sum minted here from prev's tree
 
     IRootTransitionVerifier public rootTransitionVerifier;
     IWithdrawVerifier public withdrawVerifier;
@@ -52,9 +63,18 @@ contract Verifier {
     uint256 private constant HASH_CHAIN_MASK = (1 << 246) - 1;
     uint256 private constant TREE_CAPACITY = 1 << 32;
 
-    constructor(zERC20 token_, uint256 initialRoot_) {
+    constructor(zERC20 token_, uint256 initialRoot_, Verifier prev_) {
         token = token_;
-        transferRoot = initialRoot_;
+        transferRoot = initialRoot_; // empty depth-32 tree root
+        prev = prev_;
+        if (address(prev_) != address(0)) {
+            // prev is frozen for good once finalized: updateRoot requires
+            // newIndex == reservedIndex AND newIndex > prevIndex, so nothing
+            // can advance it past its final reservation.
+            require(prev_.transferIndex() == prev_.reservedIndex(), "prev not finalized");
+            treeStart = prev_.treeStart() + prev_.transferIndex(); // global boundary index
+            transferHashChain = prev_.transferHashChain();         // boundary chain value
+        }
         owner = msg.sender;
     }
 
@@ -75,14 +95,14 @@ contract Verifier {
         singleRootTransitionVerifier = singleRoot_;
     }
 
-    /// Snapshot the token's burn hash chain so updateRoot proofs have a stable target.
+    /// Snapshot the token's burn hash chain (tree-local rebased) as the epoch
+    /// target. Index semantics: reservedIndex counts THIS tree's leaves.
     function reserveHashChain() external onlyOwner {
-        uint256 index = token.burnIndex();
+        uint256 index = token.burnIndex() - treeStart;
         require(index <= TREE_CAPACITY, "tree full");
         reservedIndex = index;
         reservedHashChain = token.burnHashChain();
     }
-
 
     /// proof = [i, z0[0..3], zi[0..3], 25 decider elements]
     /// z0 = [prevIndex, prevHashChain, prevRoot], zi = [newIndex, newHashChain, newRoot]
@@ -109,7 +129,6 @@ contract Verifier {
     }
 
     /// Single-leaf epoch — Groth16 instead of the Nova decider (which needs >= 2 steps).
-    /// pubSignals = [prevIndex, prevHashChain, prevRoot, newIndex, newHashChain, newRoot]
     function updateRootSingle(
         uint256[2] calldata pA,
         uint256[2][2] calldata pB,
@@ -139,7 +158,7 @@ contract Verifier {
 
         uint256 root = proof[3];           // z0[2] = transferRoot
         uint256 proofRecipient = proof[4]; // z0[3] = recipient
-        uint256 sum = proof[6];            // zi[1] = lifetime sum for recipient
+        uint256 sum = proof[6];            // zi[1] = lifetime sum for recipient (this tree)
 
         require(root == transferRoot, "unknown root");
         require(proofRecipient == recipient, "recipient mismatch");
@@ -154,7 +173,6 @@ contract Verifier {
     }
 
     /// pubSignals = [transferRoot, recipient, indexWithOffset, value]
-    /// indexWithOffset is an ordering token (mirrors Nova withdraw z0[0]) — not checked here.
     function withdrawSingle(
         uint256 chainId,
         address addr,
@@ -175,7 +193,7 @@ contract Verifier {
         require(transferRoot_ == transferRoot, "unknown root");
         require(proofRecipient == recipient, "recipient mismatch");
 
-        require(singleWithdrawVerifier.verifyProof(pA, pB, pC, pubSignals), "invalid proof");
+        require(singleWithdrawVerifier.verifyProof(pA, pB, pubSignals), "invalid proof");
 
         uint256 delta = sum - totalWithdrawn[recipient];
         require(delta > 0, "nothing to withdraw");
@@ -184,6 +202,49 @@ contract Verifier {
         token.teleport(addr, delta);
     }
 
+    /// Withdraw from the previous generation's frozen tree. Its frontier is
+    /// immutable, so both state reads are safe to take lazily, per recipient.
+    function withdrawLegacy(uint256 chainId, address addr, bytes32 tweak, uint256[34] calldata proof) external {
+        require(address(prev) != address(0), "no prev");
+        require(proof[3] == prev.transferRoot(), "unknown legacy root");
+        require(withdrawVerifier.verifyOpaqueNovaProof(proof), "invalid proof");
+
+        _settleLegacy(chainId, addr, tweak, proof[4], proof[6]);
+    }
+
+    function withdrawLegacySingle(
+        uint256 chainId,
+        address addr,
+        bytes32 tweak,
+        uint256[2] calldata pA,
+        uint256[2][2] calldata pB,
+        uint256[2] calldata pC,
+        uint256[4] calldata pubSignals
+    ) external {
+        require(address(prev) != address(0), "no prev");
+        require(pubSignals[0] == prev.transferRoot(), "unknown legacy root");
+        require(singleWithdrawVerifier.verifyProof(pA, pB, pC, pubSignals), "invalid proof");
+
+        _settleLegacy(chainId, addr, tweak, pubSignals[1], pubSignals[3]);
+    }
+
+    function _settleLegacy(
+        uint256 chainId,
+        address addr,
+        bytes32 tweak,
+        uint256 proofRecipient,
+        uint256 sum
+    ) internal {
+        require(chainId == block.chainid, "wrong chain");
+        uint256 recipient = computeRecipient(chainId, addr, tweak);
+        require(proofRecipient == recipient, "recipient mismatch");
+
+        uint256 delta = sum - prev.totalWithdrawn(recipient) - legacyWithdrawn[recipient];
+        require(delta > 0, "nothing to withdraw");
+        legacyWithdrawn[recipient] += delta;
+
+        token.teleport(addr, delta);
+    }
 
     function computeRecipient(uint256 chainId, address addr, bytes32 tweak)
         public

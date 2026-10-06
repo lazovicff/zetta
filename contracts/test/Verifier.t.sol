@@ -196,4 +196,17 @@ contract VerifierTest is Test {
         vm.expectRevert("wrong chain");
         verifier.withdraw(99999, bob, tweak, wproof);
     }
+
+    function test_reserve_reverts_beyond_capacity() public {
+        // exactly full: allowed
+        stdstore.target(address(token)).sig("burnIndex()").checked_write(1 << 32);
+        verifier.reserveHashChain();
+        assertEq(verifier.reservedIndex(), 1 << 32);
+
+        // beyond capacity: reverts
+        stdstore.target(address(token)).sig("burnIndex()").checked_write((1 << 32) + 1);
+        vm.expectRevert("tree full");
+        verifier.reserveHashChain();
+    }
+
 }
