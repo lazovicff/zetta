@@ -53,12 +53,10 @@ impl Config {
     }
 }
 
+/// TWEAK is a decimal integer ("0", "1", ...), encoded big-endian into 32 bytes.
 fn parse_tweak(s: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    let bytes = hex::decode(s)?;
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&bytes);
-    Ok(out)
+    let n = alloy::primitives::U256::from_str_radix(s.trim(), 10)?;
+    Ok(n.to_be_bytes::<32>())
 }
 
 fn load_broadcast(chain_id: u64) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
