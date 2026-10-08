@@ -39,7 +39,7 @@ const DOCS_VERSION: &str = "mocklaso0001";
 const DEV_WALLET: &str = "0x0000000000000000000000000000000000000001";
 const BASE_PAY_TO: &str = "0x3291e96b3bff7ed56e3ca8364273c5b4654b2b37";
 const SOL_PAY_TO: &str = "3MZVk97x9SeRxbYpc3jhzRfU2fyA3emYutnqfn9kNfYX";
-const USDC_BASE: &str = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+const USDC_BASE: &str = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
 const USDC_SOL: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const WITHDRAW_AFTER_MS: u64 = 10_000;
 
@@ -201,7 +201,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = App {
         store: Arc::new(Mutex::new(Store::default())),
         base_url: std::env::var("MOCK_LASO_BASE_URL")
-            .unwrap_or_else(|_| format!("http://127.0.0.1:{port}")),
+            .unwrap_or_else(|_| format!("http://0.0.0.0:{port}")),
         ready_ms: env_u64("MOCK_LASO_READY_MS", 8_000),
         intl_ready_ms: env_u64("MOCK_LASO_INTL_READY_MS", 15_000),
     };

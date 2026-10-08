@@ -1,0 +1,9 @@
+target/
+.git/
+.env
+artifacts/
+cache/
+broadcast/
+contracts/
+mobile/
+web/
