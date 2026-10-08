@@ -14,7 +14,6 @@ contract zERC20 is ERC20 {
     address public verifier; // the Verifier (teleport)
 
     address public owner; // Cold wallet / multisig
-    address public pendingOwner; // 2-step: fat-finger protection
 
     event BurnStep(address indexed from, address indexed to, uint256 value, uint256 hashChain);
     event MinterRotated(address indexed oldMinter, address indexed newMinter);
@@ -42,13 +41,7 @@ contract zERC20 is ERC20 {
     }
 
     function transferOwnership(address newOwner) external onlyOwner {
-        pendingOwner = newOwner;
-    }
-
-    function acceptOwnership() external {
-        require(msg.sender == pendingOwner, "not pending owner");
-        pendingOwner = address(0);
-        owner = msg.sender;
+        owner = newOwner;
     }
 
     function mint(address to, uint256 amount) external {

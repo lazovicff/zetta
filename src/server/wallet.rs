@@ -86,13 +86,15 @@ impl Wallet {
     pub async fn send_tx(
         &self,
         to: Address,
-        data: Bytes,
+        data: impl AsRef<[u8]>,
+        gas: Option<i64>,
     ) -> Result<B256, Box<dyn std::error::Error>> {
         let ctx = AuthorizationContext::new();
         let tx = UnsignedStandardEthereumTransaction {
             to: Some(to.to_string()),
             data: Some(Hex::try_from(format!("0x{}", hex::encode(&data)))?),
             chain_id: Some(Quantity::Integer(self.chain_id as i64)),
+            gas_limit: gas.map(|g| Quantity::Integer(g)),
             ..Default::default()
         };
         let r = self

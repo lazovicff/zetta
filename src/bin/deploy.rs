@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use alloy::primitives::{Address, B256, Bytes, U256};
 use alloy::providers::{Provider, ProviderBuilder};
-use alloy::rpc::types::TransactionReceipt;
+use alloy::rpc::types::{TransactionReceipt, TransactionRequest};
 use alloy::sol;
 use alloy::sol_types::{SolCall, SolValue};
 use serde_json::{Value, json};
@@ -26,6 +26,15 @@ sol! {
         function setMinter(address m) external;
         function setVerifier(address v) external;
         function setVerifiers(address root, address withdraw, address singleWithdraw, address singleRoot) external;
+        function transferOwnership(address newOwner) external;
+        function owner() external view returns (address);
+        function rootTransitionVerifier() external view returns (address);
+        function withdrawVerifier() external view returns (address);
+        function singleWithdrawVerifier() external view returns (address);
+        function singleRootTransitionVerifier() external view returns (address);
+        function usdc() external view returns (address);
+        function token() external view returns (address);
+
     }
 }
 
@@ -49,20 +58,20 @@ fn usdc_address(chain_id: u64) -> Result<Address, Box<dyn std::error::Error>> {
     }
 }
 
-fn artifact(name: &str) -> Result<Value, Box<dyn std::error::Error>> {
-    let p = format!("contracts/out/{name}.sol/{name}.json");
+fn artifact(file: &str, contract: &str) -> Result<Value, Box<dyn std::error::Error>> {
+    let p = format!("contracts/out/{file}.sol/{contract}.json");
     Ok(serde_json::from_str(
         &std::fs::read_to_string(&p)
             .map_err(|e| format!("read {p}: {e} — run `forge build` first"))?,
     )?)
 }
 
-/// Initcode with library placeholders patched to deployed addresses.
 fn bytecode(
-    name: &str,
+    file: &str,
+    contract: &str,
     libs: &HashMap<String, Address>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let a = artifact(name)?;
+    let a = artifact(file, contract)?;
     let mut code = a["bytecode"]["object"]
         .as_str()
         .ok_or("bytecode.object missing")?
@@ -73,7 +82,7 @@ fn bytecode(
             for (lib, ranges) in lib_refs.as_object().ok_or("bad linkReferences")? {
                 let addr = libs
                     .get(lib.as_str())
-                    .ok_or_else(|| format!("{name} needs library {lib} — deploy it first"))?;
+                    .ok_or_else(|| format!("{contract} needs library {lib} — deploy it first"))?;
                 let addr_hex = hex::encode(addr.into_array());
                 for r in ranges.as_array().ok_or("bad link range")? {
                     let start = r["start"].as_u64().ok_or("bad link start")? as usize * 2;
@@ -89,7 +98,7 @@ fn bytecode(
         }
     }
     if code.contains('$') {
-        return Err(format!("{name}: unresolved link references remain").into());
+        return Err(format!("{contract}: unresolved link references remain").into());
     }
     Ok(hex::decode(code)?)
 }
@@ -107,16 +116,53 @@ async fn wait_receipt(
     Err(format!("tx {hash} not mined after 180s").into())
 }
 
+async fn expect_addr(
+    provider: &impl Provider,
+    label: &str,
+    to: Address,
+    calldata: Vec<u8>,
+    expected: Address,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let raw = provider
+        .call(TransactionRequest::default().to(to).input(calldata.into()))
+        .await
+        .map_err(|e| format!("wire check {label}: {e}"))?;
+    if raw.len() < 32 {
+        return Err(format!("wire check {label}: empty response").into());
+    }
+    let got = Address::from_slice(&raw[raw.len() - 20..]);
+    if got != expected {
+        return Err(format!("wire check FAILED — {label}: got {got}, expected {expected}").into());
+    }
+    info!(stage = "verify", check = label, address = %got, "ok");
+    Ok(())
+}
+
+fn arg_owner() -> Result<Address, Box<dyn std::error::Error>> {
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if a == "--owner" {
+            return Ok(args.next().ok_or("--owner needs a value")?.parse()?);
+        }
+        if let Some(v) = a.strip_prefix("--owner=") {
+            return Ok(v.parse()?);
+        }
+        return Err(format!("unknown argument: {a}").into());
+    }
+    Err("missing --owner <address> — new owner of zERC20 + Verifier".into())
+}
+
 async fn deploy(
     wallet: &Wallet,
     provider: &impl Provider,
-    name: &str,
+    file: &str, // broadcast `contractName` — Config looks up zERC20/Verifier/USDCVault by this
+    contract: &str, // actual contract inside {file}.sol
     libs: &HashMap<String, Address>,
     ctor_args: Vec<u8>,
     txs: &mut Vec<Value>,
     receipts: &mut Vec<Value>,
 ) -> Result<Address, Box<dyn std::error::Error>> {
-    let mut initcode = bytecode(name, libs)?;
+    let mut initcode = bytecode(file, contract, libs)?;
     initcode.extend_from_slice(&ctor_args);
     let hash = wallet.deploy_tx(Bytes::from(initcode)).await?;
     let rc = wait_receipt(provider, hash).await?;
@@ -124,12 +170,12 @@ async fn deploy(
         .contract_address
         .ok_or("receipt without contract address")?;
     if !rc.status() {
-        return Err(format!("{name} deployment reverted in {hash}").into());
+        return Err(format!("{contract} deployment reverted in {hash}").into());
     }
-    info!(stage = "deploy", contract = name, address = %addr, "deployed");
+    info!(stage = "deploy", contract = contract, address = %addr, "deployed");
     txs.push(json!({
         "transactionType": "CREATE",
-        "contractName": name,
+        "contractName": contract,
         "contractAddress": format!("{addr}"),
         "hash": format!("{hash}"),
     }));
@@ -147,7 +193,7 @@ async fn call(
     to: Address,
     data: Vec<u8>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let hash = wallet.send_tx(to, Bytes::from(data)).await?;
+    let hash = wallet.send_tx(to, Bytes::from(data), Some(300_000)).await?;
     let rc = wait_receipt(provider, hash).await?;
     if !rc.status() {
         return Err(format!("{label} reverted in {hash}").into());
@@ -164,6 +210,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
     dotenv::dotenv().ok();
+
+    // top of main, right after logging boot:
+    let new_owner = arg_owner()?;
+    if new_owner.is_zero() {
+        return Err("--owner 0x0 would brick ownership".into());
+    }
 
     let chain_id: u64 = env("CHAIN_ID")?.parse()?;
     let provider = ProviderBuilder::new().connect_http(env("RPC_URL")?.parse()?);
@@ -188,10 +240,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut receipts = Vec::new();
     let mut libs = HashMap::new();
 
-    // 1. Poseidon library (zERC20 links against its public hash()).
+    // 1. Poseidon library
     let poseidon_t4 = deploy(
         &wallet,
         &provider,
+        "PoseidonT4",
         "PoseidonT4",
         &libs,
         vec![],
@@ -201,10 +254,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     libs.insert("PoseidonT4".to_string(), poseidon_t4);
 
-    // 2. Token. Deployer is owner; minter/verifier bootstrap to deployer.
+    // 2. Token
     let token = deploy(
         &wallet,
         &provider,
+        "zERC20",
         "zERC20",
         &libs,
         ("Zetta USDC".to_string(), "zUSDC".to_string()).abi_encode_params(),
@@ -213,11 +267,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-    // 3. USDC vault.
+    // 3. USDC vault
     let usdc = usdc_address(chain_id)?;
     let vault = deploy(
         &wallet,
         &provider,
+        "USDCVault",
         "USDCVault",
         &libs,
         (usdc, token).abi_encode_params(),
@@ -226,11 +281,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-    // 4. Decider verifiers (stateless, no ctor args).
+    // 4. Decider verifiers
     let root_v = deploy(
         &wallet,
         &provider,
         "RootTransitionVerifier",
+        "NovaDecider",
         &libs,
         vec![],
         &mut txs,
@@ -241,6 +297,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &wallet,
         &provider,
         "WithdrawVerifier",
+        "NovaDecider",
         &libs,
         vec![],
         &mut txs,
@@ -251,6 +308,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &wallet,
         &provider,
         "SingleWithdrawVerifier",
+        "Groth16Verifier",
         &libs,
         vec![],
         &mut txs,
@@ -261,6 +319,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &wallet,
         &provider,
         "SingleRootTransitionVerifier",
+        "Groth16Verifier",
         &libs,
         vec![],
         &mut txs,
@@ -268,10 +327,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-    // 5. Verifier (genesis: empty tree, no prev in current contract).
+    // 5. Verifier
     let verifier = deploy(
         &wallet,
         &provider,
+        "Verifier",
         "Verifier",
         &libs,
         (token, initial_root).abi_encode_params(),
@@ -325,9 +385,87 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         usdc = %usdc, token = %token, vault = %vault, verifier = %verifier,
         "deployment complete"
     );
-    info!(
-        stage = "done",
-        "next: fund the operator wallet with USDC, then transfer token/verifier ownership to the multisig (transferOwnership → acceptOwnership)"
-    );
+    // last call of the script — single-step: instant, irreversible from this wallet
+    call(
+        &wallet,
+        &provider,
+        "zERC20.transferOwnership",
+        token,
+        IAdmin::transferOwnershipCall {
+            newOwner: new_owner,
+        }
+        .abi_encode(),
+    )
+    .await?;
+
+    info!(stage = "done", owner = %new_owner,
+        "zERC20 ownership transferred; fund the operator wallet with USDC");
+
+    // 8b. Post-deploy wiring verification.
+    expect_addr(
+        &provider,
+        "Verifier.rootTransitionVerifier",
+        verifier,
+        IAdmin::rootTransitionVerifierCall {}.abi_encode(),
+        root_v,
+    )
+    .await?;
+    expect_addr(
+        &provider,
+        "Verifier.withdrawVerifier",
+        verifier,
+        IAdmin::withdrawVerifierCall {}.abi_encode(),
+        withdraw_v,
+    )
+    .await?;
+    expect_addr(
+        &provider,
+        "Verifier.singleWithdrawVerifier",
+        verifier,
+        IAdmin::singleWithdrawVerifierCall {}.abi_encode(),
+        single_withdraw_v,
+    )
+    .await?;
+    expect_addr(
+        &provider,
+        "Verifier.singleRootTransitionVerifier",
+        verifier,
+        IAdmin::singleRootTransitionVerifierCall {}.abi_encode(),
+        single_root_v,
+    )
+    .await?;
+    expect_addr(
+        &provider,
+        "Verifier.owner",
+        verifier,
+        IAdmin::ownerCall {}.abi_encode(),
+        wallet.address(),
+    )
+    .await?;
+    expect_addr(
+        &provider,
+        "USDCVault.usdc",
+        vault,
+        IAdmin::usdcCall {}.abi_encode(),
+        usdc,
+    )
+    .await?;
+    expect_addr(
+        &provider,
+        "USDCVault.token",
+        vault,
+        IAdmin::tokenCall {}.abi_encode(),
+        token,
+    )
+    .await?;
+    expect_addr(
+        &provider,
+        "zERC20.owner",
+        token,
+        IAdmin::ownerCall {}.abi_encode(),
+        new_owner,
+    )
+    .await?;
+
     Ok(())
 }

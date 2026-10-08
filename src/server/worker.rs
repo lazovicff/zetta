@@ -672,7 +672,7 @@ pub async fn send_and_confirm(
     to: Address,
     data: alloy::primitives::Bytes,
 ) -> Result<alloy::rpc::types::TransactionReceipt, Box<dyn std::error::Error>> {
-    let hash = wallet.send_tx(to, data).await?;
+    let hash = wallet.send_tx(to, data, None).await?;
     for _ in 0..180 {
         if let Some(rc) = provider.get_transaction_receipt(hash).await? {
             return Ok(rc);

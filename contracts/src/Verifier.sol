@@ -83,7 +83,6 @@ contract Verifier {
         reservedHashChain = token.burnHashChain();
     }
 
-
     /// proof = [i, z0[0..3], zi[0..3], 25 decider elements]
     /// z0 = [prevIndex, prevHashChain, prevRoot], zi = [newIndex, newHashChain, newRoot]
     function updateRoot(uint256[32] calldata proof) external {

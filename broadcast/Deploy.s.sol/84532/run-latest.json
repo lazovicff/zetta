@@ -1,0 +1,86 @@
+{
+  "receipts": [
+    {
+      "blockNumber": "0x2da2207",
+      "transactionHash": "0x1fccf83a7575872b1dabb1ad46a341d4332f0cddb3de6655ace3369cf5e435a9"
+    },
+    {
+      "blockNumber": "0x2da2208",
+      "transactionHash": "0x55b930a9851cea0af51f65ec055d3eb9c506f296ace14e0877d2a310b20ef118"
+    },
+    {
+      "blockNumber": "0x2da2209",
+      "transactionHash": "0x2c5b6c74460b480800e8cca2eaed93b12628d1095bb419b21ff431be13953641"
+    },
+    {
+      "blockNumber": "0x2da2209",
+      "transactionHash": "0x2c8c7935117262c2c412b6cf5c1a455c3ac4813633765db4e2efca01dd8f4dd8"
+    },
+    {
+      "blockNumber": "0x2da220a",
+      "transactionHash": "0x0dfaf4e310658382b8469070fa0a0db196753f29b1b4dab8bce4458e8dba40b7"
+    },
+    {
+      "blockNumber": "0x2da220a",
+      "transactionHash": "0x35d75d5513dbe27c68606cc71d61c6b91429501e3e631090ea4e6630d3a32922"
+    },
+    {
+      "blockNumber": "0x2da220b",
+      "transactionHash": "0x299c5e6573be7c09a7be00d72e688762c404ca83deac223ac01aa41d3c90f6f5"
+    },
+    {
+      "blockNumber": "0x2da220b",
+      "transactionHash": "0x14c0f741896a1c05764a11e9e0aeb66cb5bf88e6a20478ab1436a7cf10fbd497"
+    }
+  ],
+  "transactions": [
+    {
+      "contractAddress": "0xEc2564936fC0d89f51c26BeD9807aA505Df7a5c4",
+      "contractName": "PoseidonT4",
+      "hash": "0x1fccf83a7575872b1dabb1ad46a341d4332f0cddb3de6655ace3369cf5e435a9",
+      "transactionType": "CREATE"
+    },
+    {
+      "contractAddress": "0xC89A9cBDF6FdD8f9717fAaEdBE3Ba3D6575700F1",
+      "contractName": "zERC20",
+      "hash": "0x55b930a9851cea0af51f65ec055d3eb9c506f296ace14e0877d2a310b20ef118",
+      "transactionType": "CREATE"
+    },
+    {
+      "contractAddress": "0xf70DcE978C9402030D82b1803bE1729397c51449",
+      "contractName": "USDCVault",
+      "hash": "0x2c5b6c74460b480800e8cca2eaed93b12628d1095bb419b21ff431be13953641",
+      "transactionType": "CREATE"
+    },
+    {
+      "contractAddress": "0xFbbE81B460C26D01a45cF391D886395765f46C9c",
+      "contractName": "NovaDecider",
+      "hash": "0x2c8c7935117262c2c412b6cf5c1a455c3ac4813633765db4e2efca01dd8f4dd8",
+      "transactionType": "CREATE"
+    },
+    {
+      "contractAddress": "0x47376FFFc1084a47F9Fb5d15FE27D78EED5bA43B",
+      "contractName": "NovaDecider",
+      "hash": "0x0dfaf4e310658382b8469070fa0a0db196753f29b1b4dab8bce4458e8dba40b7",
+      "transactionType": "CREATE"
+    },
+    {
+      "contractAddress": "0x3b3aBFF3C655af1a539e5F8401641d3DA991B3a7",
+      "contractName": "Groth16Verifier",
+      "hash": "0x35d75d5513dbe27c68606cc71d61c6b91429501e3e631090ea4e6630d3a32922",
+      "transactionType": "CREATE"
+    },
+    {
+      "contractAddress": "0xFAD9A78F8Fa9bAb87244582e1ab3E495ed9A5B84",
+      "contractName": "Groth16Verifier",
+      "hash": "0x299c5e6573be7c09a7be00d72e688762c404ca83deac223ac01aa41d3c90f6f5",
+      "transactionType": "CREATE"
+    },
+    {
+      "contractAddress": "0x31D92B4CbC00f874Ba215F8449aC90Da6F12EBa8",
+      "contractName": "Verifier",
+      "hash": "0x14c0f741896a1c05764a11e9e0aeb66cb5bf88e6a20478ab1436a7cf10fbd497",
+      "transactionType": "CREATE"
+    }
+  ]
+}
