@@ -4,7 +4,7 @@ use alloy::primitives::U256;
 use ark_bn254::{Fq, Fr};
 use ark_grumpkin::Projective as G2;
 
-use crate::config::Config;
+use crate::server::db::Settings;
 use crate::tree::{HashChain, MerkleTree, TREE_DEPTH};
 
 #[derive(Clone)]
@@ -39,13 +39,15 @@ pub struct State {
     pub max_users: i64,
     pub max_cards_per_user: i64,
     pub card_limit_window_days: i64,
+    // State struct, after card_limit_window_days:
+    pub poll_interval_secs: u64,
 }
 
 impl State {
     pub fn new(
-        config: &Config,
         chain_id: u64,
         exchange_addr: [u8; 20],
+        settings: &Settings,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self {
             tree: MerkleTree::new(TREE_DEPTH),
@@ -54,7 +56,7 @@ impl State {
             committed_index: 0,
             chain_id,
             exchange_addr,
-            tweak: config.tweak,
+            tweak: settings.tweak,
             pubkey_by_addr: HashMap::new(),
             sig_by_addr: HashMap::new(),
             salt_by_addr: HashMap::new(),
@@ -62,9 +64,19 @@ impl State {
             credits: HashMap::new(),
             registered_from: HashMap::new(),
             blacklist: HashSet::new(),
-            max_users: config.max_users,
-            max_cards_per_user: config.max_cards_per_user,
-            card_limit_window_days: config.card_limit_window_days,
+            max_users: settings.max_users,
+            max_cards_per_user: settings.max_cards_per_user,
+            card_limit_window_days: settings.card_limit_window_days,
+            poll_interval_secs: settings.poll_interval_secs,
         })
+    }
+
+    /// Hot-apply DB-backed settings; reloaded by the worker each tick.
+    pub fn apply_settings(&mut self, s: &Settings) {
+        self.tweak = s.tweak;
+        self.max_users = s.max_users;
+        self.max_cards_per_user = s.max_cards_per_user;
+        self.card_limit_window_days = s.card_limit_window_days;
+        self.poll_interval_secs = s.poll_interval_secs;
     }
 }

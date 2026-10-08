@@ -8,8 +8,6 @@ pub struct Config {
     pub token: Address,
     pub verifier: Address,
     pub vault: Address,
-    pub tweak: [u8; 32],
-    pub poll_interval_secs: u64,
     pub port: u16,
     pub chain_id: u64,
     pub last_block: u64,
@@ -18,12 +16,6 @@ pub struct Config {
     pub privy_app_secret: String,
     pub privy_wallet_id: String,
     pub wallet_address: Address,
-    /// Max unique registered pubkeys; new users are rejected at/above this.
-    pub max_users: i64,
-    /// Max non-failed card orders per user within `card_limit_window_days`.
-    pub max_cards_per_user: i64,
-    /// Rolling window (days) for the per-user card-issuance limit.
-    pub card_limit_window_days: i64,
 }
 
 impl Config {
@@ -41,22 +33,32 @@ impl Config {
             privy_app_secret: std::env::var("PRIVY_APP_SECRET")?,
             privy_wallet_id: std::env::var("PRIVY_WALLET_ID")?,
             wallet_address: std::env::var("PRIVY_WALLET_ADDRESS")?.parse()?,
-            tweak: parse_tweak(&std::env::var("TWEAK")?)?,
-            poll_interval_secs: std::env::var("POLL_INTERVAL_SECS")?.parse()?,
-            port: std::env::var("PORT")?.parse()?,
+            port: parse_port()?,
             chain_id,
             last_block: deployment_block(chain_id, "zERC20")?,
-            max_users: std::env::var("MAX_USERS")?.parse()?,
-            max_cards_per_user: std::env::var("MAX_CARDS_PER_USER")?.parse()?,
-            card_limit_window_days: std::env::var("CARD_LIMIT_WINDOW_DAYS")?.parse()?,
         })
     }
 }
 
 /// TWEAK is a decimal integer ("0", "1", ...), encoded big-endian into 32 bytes.
-fn parse_tweak(s: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+pub fn parse_tweak(s: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
     let n = alloy::primitives::U256::from_str_radix(s.trim(), 10)?;
     Ok(n.to_be_bytes::<32>())
+}
+
+/// CLI: `--port <u16>` or `--port=<u16>`; default 3000.
+fn parse_port() -> Result<u16, Box<dyn std::error::Error>> {
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if a == "--port" {
+            return Ok(args.next().ok_or("--port needs a value")?.parse()?);
+        }
+        if let Some(v) = a.strip_prefix("--port=") {
+            return Ok(v.parse()?);
+        }
+        return Err(format!("unknown argument: {a}").into());
+    }
+    Ok(3000)
 }
 
 fn load_broadcast(chain_id: u64) -> Result<serde_json::Value, Box<dyn std::error::Error>> {

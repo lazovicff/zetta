@@ -58,6 +58,15 @@ pub async fn run(
     // Boot: full replay from the deployment block; afterwards incremental.
     let mut last_block = config.last_block;
     loop {
+        // Load settings
+        match db.load_settings().await {
+            Ok(s) => {
+                state.lock().unwrap().apply_settings(&s);
+            }
+            Err(e) => {
+                warn!(stage = "settings", error = %e, "settings reload failed; keeping current")
+            }
+        }
         // Phase 1: catch the mirror up to the finalized prefix [0..transferIndex).
         let mut next = state.lock().unwrap().clone(); // shared slot untouched on failure
         let p = prepare(&mut next, provider, config, db, last_block).await?;
@@ -80,7 +89,8 @@ pub async fn run(
         if let Err(e) = payouts(provider, wallet, config, db).await {
             warn!(stage = "payout", error = %e, "phase 3 failed");
         }
-        tokio::time::sleep(Duration::from_secs(config.poll_interval_secs)).await;
+        let secs = state.lock().unwrap().poll_interval_secs;
+        tokio::time::sleep(Duration::from_secs(secs)).await;
     }
 }
 

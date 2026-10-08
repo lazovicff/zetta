@@ -40,13 +40,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Read-only provider; every send/sign goes through the Privy wallet.
     let provider = ProviderBuilder::new().connect_http(config.rpc_url.parse()?);
 
+    let db = Db::open(&config.database_url).await?;
+    let settings = db.load_settings().await?;
+
     let state: SharedState = Arc::new(Mutex::new(State::new(
-        &config,
         config.chain_id,
         exchange_addr,
+        &settings,
     )?));
-    let db = Db::open(&config.database_url).await?;
-    tracing::info!(stage = "boot", "database connected");
     worker::log_recipient(&state);
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", config.port))

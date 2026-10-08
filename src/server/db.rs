@@ -10,6 +10,7 @@
 //! closing only stops the card from being the active one.
 
 use crate::burn::address_to_fr;
+use crate::config::parse_tweak;
 use crate::ids::user_id;
 use crate::zkp::poseidon2;
 use crate::zkp::poseidon3;
@@ -755,5 +756,57 @@ impl Db {
             return Err(format!("order {provider_ref} not succeeded (or missing)"));
         }
         Ok(())
+    }
+}
+
+pub struct Settings {
+    pub tweak: [u8; 32],
+    pub poll_interval_secs: u64,
+    pub max_users: i64,
+    pub max_cards_per_user: i64,
+    pub card_limit_window_days: i64,
+}
+
+impl Db {
+    /// Seed missing rows from env config; existing rows win (DB is source of truth).
+    pub async fn init_settings(&self, seed: &Settings) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO settings (key, value) VALUES
+             ('tweak', $1), ('poll_interval_secs', $2), ('max_users', $3),
+             ('max_cards_per_user', $4), ('card_limit_window_days', $5)
+             ON CONFLICT (key) DO NOTHING",
+        )
+        .bind(U256::from_be_bytes(seed.tweak).to_string())
+        .bind(seed.poll_interval_secs.to_string())
+        .bind(seed.max_users.to_string())
+        .bind(seed.max_cards_per_user.to_string())
+        .bind(seed.card_limit_window_days.to_string())
+        .execute(&self.0)
+        .await?;
+        Ok(())
+    }
+
+    /// Whole-settings load. Fails if any row is missing/malformed — the
+    /// caller keeps the previously applied values.
+    pub async fn load_settings(&self) -> Result<Settings, Box<dyn std::error::Error>> {
+        let rows = sqlx::query("SELECT key, value FROM settings")
+            .fetch_all(&self.0)
+            .await?;
+        let map: std::collections::HashMap<String, String> = rows
+            .into_iter()
+            .map(|r| (r.get::<String, _>("key"), r.get::<String, _>("value")))
+            .collect();
+        let take = |k: &str| -> Result<&str, String> {
+            map.get(k)
+                .map(String::as_str)
+                .ok_or_else(|| format!("missing settings row: {k}"))
+        };
+        Ok(Settings {
+            tweak: parse_tweak(take("tweak")?)?,
+            poll_interval_secs: take("poll_interval_secs")?.parse()?,
+            max_users: take("max_users")?.parse()?,
+            max_cards_per_user: take("max_cards_per_user")?.parse()?,
+            card_limit_window_days: take("card_limit_window_days")?.parse()?,
+        })
     }
 }
