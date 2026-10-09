@@ -9,23 +9,23 @@ import {zERC20} from "./zERC20.sol";
 contract USDCVault {
     using SafeERC20 for IERC20;
 
-    IERC20 public immutable usdc;
-    zERC20 public immutable token;
+    IERC20 public immutable USDC;
+    zERC20 public immutable TOKEN;
 
     constructor(IERC20 usdc_, zERC20 token_) {
-        usdc = usdc_;
-        token = token_;
+        USDC = usdc_;
+        TOKEN = token_;
     }
 
     /// Deposit USDC, receive zUSDC 1:1.
     function wrap(uint256 amount) external {
-        usdc.safeTransferFrom(msg.sender, address(this), amount);
-        token.mint(msg.sender, amount);
+        USDC.safeTransferFrom(msg.sender, address(this), amount);
+        TOKEN.mint(msg.sender, amount);
     }
 
     /// Burn zUSDC, receive USDC 1:1.
     function unwrap(uint256 amount) external {
-        token.burn(msg.sender, amount);
-        usdc.safeTransfer(msg.sender, amount);
+        TOKEN.burn(msg.sender, amount);
+        USDC.safeTransfer(msg.sender, amount);
     }
 }

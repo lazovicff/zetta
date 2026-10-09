@@ -119,9 +119,9 @@ contract VerifierTest is Test {
 
     function test_update_root() public {
         vm.startPrank(alice);
-        token.transfer(bob, 100 ether);
-        token.transfer(bob, 200 ether);
-        token.transfer(bob, 300 ether);
+        assertTrue(token.transfer(bob, 100 ether));
+        assertTrue(token.transfer(bob, 200 ether));
+        assertTrue(token.transfer(bob, 300 ether));
         vm.stopPrank();
 
         uint256 newRoot = 12345;
@@ -134,7 +134,7 @@ contract VerifierTest is Test {
 
     function test_update_root_stale_reverts() public {
         vm.prank(alice);
-        token.transfer(bob, 100 ether);
+        assertTrue(token.transfer(bob, 100 ether));
 
         uint256[32] memory proof;
         proof[1] = 1; // wrong prevIndex (stored is 0)
@@ -149,7 +149,7 @@ contract VerifierTest is Test {
 
     function test_withdraw_mints_delta() public {
         vm.prank(alice);
-        token.transfer(bob, 100 ether);
+        assertTrue(token.transfer(bob, 100 ether));
         _updateRoot(12345);
 
         bytes32 tweak = 0x2222222222222222222222222222222222222222222222222222222222222222;
@@ -169,7 +169,7 @@ contract VerifierTest is Test {
 
     function test_withdraw_double_reverts() public {
         vm.prank(alice);
-        token.transfer(bob, 100 ether);
+        assertTrue(token.transfer(bob, 100 ether));
         _updateRoot(12345);
 
         bytes32 tweak = 0x2222222222222222222222222222222222222222222222222222222222222222;

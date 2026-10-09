@@ -20,8 +20,12 @@ contract zERC20 is ERC20 {
     event VerifierRotated(address indexed oldVerifier, address indexed newVerifier);
 
     modifier onlyOwner() {
-        require(msg.sender == owner, "not owner");
+        _onlyOwner();
         _;
+    }
+
+    function _onlyOwner() internal view {
+        require(msg.sender == owner, "not owner");
     }
 
     constructor(string memory name_, string memory symbol_) ERC20(name_, symbol_) {

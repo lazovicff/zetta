@@ -59,8 +59,12 @@ contract Verifier {
     }
 
     modifier onlyOwner() {
-        require(msg.sender == owner, "not owner");
+        _onlyOwner();
         _;
+    }
+
+    function _onlyOwner() internal view {
+        require(msg.sender == owner, "not owner");
     }
 
     function setVerifiers(
@@ -189,7 +193,12 @@ contract Verifier {
         pure
         returns (uint256)
     {
-        bytes32 h = keccak256(abi.encodePacked(uint64(chainId), addr, tweak));
+        require(chainId <= type(uint64).max, "chain id too large");
+        // casting to 'uint64' is safe because chain ids are bounded by EIP-2294
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint64 cid = uint64(chainId);
+        // forge-lint: disable-next-line(asm-keccak256)
+        bytes32 h = keccak256(abi.encodePacked(cid, addr, tweak));
         return uint256(h) & HASH_CHAIN_MASK;
     }
 }
