@@ -1,5 +1,61 @@
 use alloy::primitives::Address;
 
+#[derive(Clone, Copy)]
+pub enum Network {
+    BaseSepolia,
+    BaseMainnet,
+}
+
+impl Network {
+    pub fn chain_id(&self) -> u64 {
+        match self {
+            Self::BaseSepolia => 84532,
+            Self::BaseMainnet => 8453,
+        }
+    }
+    pub fn rpc_url(&self) -> &'static str {
+        match self {
+            Self::BaseSepolia => "https://sepolia.base.org",
+            Self::BaseMainnet => "https://mainnet.base.org",
+        }
+    }
+    pub fn laso_url(&self) -> &'static str {
+        match self {
+            Self::BaseSepolia => "http://localhost:4100",
+            Self::BaseMainnet => "https://laso.finance",
+        }
+    }
+}
+
+struct Cli {
+    network: Network,
+    port: u16,
+}
+
+/// CLI: `base-sepolia | base-mainnet [--port <u16>]`.
+fn parse_cli() -> Result<Cli, Box<dyn std::error::Error>> {
+    let mut network = None;
+    let mut port = 3000u16;
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "base-sepolia" => network = Some(Network::BaseSepolia),
+            "base-mainnet" => network = Some(Network::BaseMainnet),
+            "--port" => port = args.next().ok_or("--port needs a value")?.parse()?,
+            _ => {
+                if let Some(v) = a.strip_prefix("--port=") {
+                    port = v.parse()?;
+                } else {
+                    return Err(format!("unknown argument: {a}").into());
+                }
+            }
+        }
+    }
+    let network =
+        network.ok_or("missing network argument — pass 'base-sepolia' or 'base-mainnet'")?;
+    Ok(Cli { network, port })
+}
+
 pub struct Config {
     pub rpc_url: String,
     pub database_url: String,
@@ -21,11 +77,12 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
         dotenv::dotenv().ok();
-        let chain_id: u64 = std::env::var("CHAIN_ID")?.parse()?;
+        let cli = parse_cli()?;
+        let chain_id = cli.network.chain_id();
         Ok(Self {
-            rpc_url: std::env::var("RPC_URL")?,
+            rpc_url: cli.network.rpc_url().to_string(),
             database_url: std::env::var("DATABASE_URL")?,
-            laso_url: std::env::var("LASO_URL")?,
+            laso_url: cli.network.laso_url().to_string(),
             token: deployed_address(chain_id, "zERC20")?,
             verifier: deployed_address(chain_id, "Verifier")?,
             vault: deployed_address(chain_id, "USDCVault")?,
@@ -33,7 +90,7 @@ impl Config {
             privy_app_secret: std::env::var("PRIVY_APP_SECRET")?,
             privy_wallet_id: std::env::var("PRIVY_WALLET_ID")?,
             wallet_address: std::env::var("PRIVY_WALLET_ADDRESS")?.parse()?,
-            port: parse_port()?,
+            port: cli.port,
             chain_id,
             last_block: deployment_block(chain_id, "zERC20")?,
         })
@@ -44,21 +101,6 @@ impl Config {
 pub fn parse_tweak(s: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
     let n = alloy::primitives::U256::from_str_radix(s.trim(), 10)?;
     Ok(n.to_be_bytes::<32>())
-}
-
-/// CLI: `--port <u16>` or `--port=<u16>`; default 3000.
-fn parse_port() -> Result<u16, Box<dyn std::error::Error>> {
-    let mut args = std::env::args().skip(1);
-    while let Some(a) = args.next() {
-        if a == "--port" {
-            return Ok(args.next().ok_or("--port needs a value")?.parse()?);
-        }
-        if let Some(v) = a.strip_prefix("--port=") {
-            return Ok(v.parse()?);
-        }
-        return Err(format!("unknown argument: {a}").into());
-    }
-    Ok(3000)
 }
 
 fn load_broadcast(chain_id: u64) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
