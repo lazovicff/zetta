@@ -36,7 +36,7 @@ use crate::zkp::{
 };
 
 /// Max blocks per eth_getLogs call — under hosted-RPC range caps.
-const LOG_CHUNK: u64 = 9_500;
+const LOG_CHUNK: u64 = 200;
 
 /// Phase-1 output: progress bookkeeping. The mirror state itself is extended
 /// in place and read back by later phases from the shared slot.
