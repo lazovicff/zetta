@@ -68,4 +68,8 @@ contract zERC20 is ERC20 {
             emit BurnStep(from, to, value, burnHashChain);
         }
     }
+
+    function decimals() public view virtual override returns (uint8) {
+        return 6;
+    }
 }

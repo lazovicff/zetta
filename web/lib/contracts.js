@@ -1,5 +1,10 @@
-export const ADDRESSES = {
-  usdc: process.env.NEXT_PUBLIC_USDC_ADDRESS ?? "0x",
-  token: process.env.NEXT_PUBLIC_TOKEN_ADDRESS ?? "0x",
-  vault: process.env.NEXT_PUBLIC_VAULT_ADDRESS ?? "0x",
-};
+import addresses from "@/data/addresses.json";
+
+export function getAddresses(chainId) {
+  const a = addresses[chainId];
+  return {
+    usdc: a?.usdc ?? "0x",
+    token: a?.token ?? "0x",
+    vault: a?.vault ?? "0x",
+  };
+}

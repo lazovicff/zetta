@@ -1,5 +1,7 @@
 export const privyConfig = {
-  loginMethods: ["wallet"],
+  loginMethods: ["wallet"], // WalletConnect / external wallets only
   appearance: { theme: "dark" },
-  embeddedWallets: { ethereum: { createOnLogin: "users-without-wallets" } },
+  embeddedWallets: {
+    createOnLogin: "off", // never create an embedded wallet
+  },
 };
