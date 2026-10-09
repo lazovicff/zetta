@@ -44,7 +44,7 @@ sol! {
 sol! {
     #[sol(rpc)]
     interface IVault {
-        function usdc() external view returns (address);
+        function USDC() external view returns (address);
         function unwrap(uint256 amount) external;
     }
 }

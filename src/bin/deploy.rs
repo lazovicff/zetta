@@ -34,9 +34,8 @@ sol! {
         function withdrawVerifier() external view returns (address);
         function singleWithdrawVerifier() external view returns (address);
         function singleRootTransitionVerifier() external view returns (address);
-        function usdc() external view returns (address);
-        function token() external view returns (address);
-
+        function USDC() external view returns (address);
+        function TOKEN() external view returns (address);
     }
 }
 
@@ -460,7 +459,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &provider,
         "USDCVault.usdc",
         vault,
-        IAdmin::usdcCall {}.abi_encode(),
+        IAdmin::USDCCall {}.abi_encode(),
         usdc,
     )
     .await?;
@@ -468,7 +467,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &provider,
         "USDCVault.token",
         vault,
-        IAdmin::tokenCall {}.abi_encode(),
+        IAdmin::TOKENCall {}.abi_encode(),
         token,
     )
     .await?;
