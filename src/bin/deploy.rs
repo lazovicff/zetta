@@ -4,7 +4,8 @@
 //! broadcast JSON that Config reads. Run `forge build` first.
 //!
 //! Env: PRIVY_APP_ID · PRIVY_APP_SECRET · PRIVY_WALLET_ID · PRIVY_WALLET_ADDRESS
-//!      RPC_URL · CHAIN_ID (84532 Base Sepolia) · USDC_ADDRESS (per-chain default)
+//!      · USDC_ADDRESS (per-chain default)
+//! Args: <network> --owner <address>   (network: base-sepolia | base-mainnet)
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -17,6 +18,7 @@ use alloy::sol_types::{SolCall, SolValue};
 use serde_json::{Value, json};
 use tracing::info;
 
+use zetta::config::Network;
 use zetta::server::db::fr_to_u256;
 use zetta::server::wallet::Wallet;
 use zetta::tree::{MerkleTree, TREE_DEPTH};
@@ -64,6 +66,31 @@ fn artifact(file: &str, contract: &str) -> Result<Value, Box<dyn std::error::Err
         &std::fs::read_to_string(&p)
             .map_err(|e| format!("read {p}: {e} — run `forge build` first"))?,
     )?)
+}
+
+struct Args {
+    network: Network,
+    owner: Address,
+}
+
+fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
+    let mut network = None;
+    let mut owner = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if a == "--owner" {
+            owner = Some(args.next().ok_or("--owner needs a value")?.parse()?);
+        } else if let Some(v) = a.strip_prefix("--owner=") {
+            owner = Some(v.parse()?);
+        } else if network.is_none() {
+            network = Some(Network::from_name(&a)?);
+        } else {
+            return Err(format!("unknown argument: {a}").into());
+        }
+    }
+    let network = network.ok_or("missing network name — pass 'base-sepolia' or 'base-mainnet'")?;
+    let owner = owner.ok_or("missing --owner <address> — new owner of zERC20 + Verifier")?;
+    Ok(Args { network, owner })
 }
 
 fn bytecode(
@@ -138,20 +165,6 @@ async fn expect_addr(
     Ok(())
 }
 
-fn arg_owner() -> Result<Address, Box<dyn std::error::Error>> {
-    let mut args = std::env::args().skip(1);
-    while let Some(a) = args.next() {
-        if a == "--owner" {
-            return Ok(args.next().ok_or("--owner needs a value")?.parse()?);
-        }
-        if let Some(v) = a.strip_prefix("--owner=") {
-            return Ok(v.parse()?);
-        }
-        return Err(format!("unknown argument: {a}").into());
-    }
-    Err("missing --owner <address> — new owner of zERC20 + Verifier".into())
-}
-
 async fn deploy(
     wallet: &Wallet,
     provider: &impl Provider,
@@ -212,15 +225,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv::dotenv().ok();
 
     // top of main, right after logging boot:
-    let new_owner = arg_owner()?;
+    let args = parse_args()?;
+    let new_owner = args.owner;
     if new_owner.is_zero() {
         return Err("--owner 0x0 would brick ownership".into());
     }
 
-    let chain_id: u64 = env("CHAIN_ID")?.parse()?;
-    let provider = ProviderBuilder::new().connect_http(env("RPC_URL")?.parse()?);
+    let chain_id = args.network.chain_id();
+    let provider = ProviderBuilder::new().connect_http(args.network.rpc_url().parse()?);
     if provider.get_chain_id().await? != chain_id {
-        return Err("CHAIN_ID does not match RPC_URL network".into());
+        return Err("network chain_id does not match RPC endpoint".into());
     }
     let wallet = Wallet::new(
         &env("PRIVY_APP_ID")?,

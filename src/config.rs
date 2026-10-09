@@ -25,35 +25,38 @@ impl Network {
             Self::BaseMainnet => "https://laso.finance",
         }
     }
+
+    pub fn from_name(name: &str) -> Result<Self, String> {
+        match name {
+            "base-sepolia" => Ok(Self::BaseSepolia),
+            "base-mainnet" => Ok(Self::BaseMainnet),
+            _ => Err(format!(
+                "unknown network '{name}' — pass 'base-sepolia' or 'base-mainnet'"
+            )),
+        }
+    }
+
+    pub fn port(&self) -> u16 {
+        match self {
+            Self::BaseSepolia => 3000,
+            Self::BaseMainnet => 3001,
+        }
+    }
 }
 
 struct Cli {
     network: Network,
-    port: u16,
 }
 
-/// CLI: `base-sepolia | base-mainnet [--port <u16>]`.
+/// CLI: `base-sepolia | base-mainnet`.
 fn parse_cli() -> Result<Cli, Box<dyn std::error::Error>> {
-    let mut network = None;
-    let mut port = 3000u16;
     let mut args = std::env::args().skip(1);
-    while let Some(a) = args.next() {
-        match a.as_str() {
-            "base-sepolia" => network = Some(Network::BaseSepolia),
-            "base-mainnet" => network = Some(Network::BaseMainnet),
-            "--port" => port = args.next().ok_or("--port needs a value")?.parse()?,
-            _ => {
-                if let Some(v) = a.strip_prefix("--port=") {
-                    port = v.parse()?;
-                } else {
-                    return Err(format!("unknown argument: {a}").into());
-                }
-            }
-        }
-    }
-    let network =
-        network.ok_or("missing network argument — pass 'base-sepolia' or 'base-mainnet'")?;
-    Ok(Cli { network, port })
+    let name = args
+        .next()
+        .ok_or("missing network argument — pass 'base-sepolia' or 'base-mainnet'")?;
+    Ok(Cli {
+        network: Network::from_name(&name)?,
+    })
 }
 
 pub struct Config {
@@ -90,7 +93,7 @@ impl Config {
             privy_app_secret: std::env::var("PRIVY_APP_SECRET")?,
             privy_wallet_id: std::env::var("PRIVY_WALLET_ID")?,
             wallet_address: std::env::var("PRIVY_WALLET_ADDRESS")?.parse()?,
-            port: cli.port,
+            port: cli.network.port(),
             chain_id,
             last_block: deployment_block(chain_id, "zERC20")?,
         })
