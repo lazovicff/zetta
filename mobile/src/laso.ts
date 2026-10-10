@@ -6,6 +6,7 @@
 // never by laso.finance (which verifies on-chain). Do not point this at production.
 
 import * as SecureStore from 'expo-secure-store';
+import { NETWORKS, caipId } from './networks';
 
 const LASO_URL = process.env.EXPO_PUBLIC_LASO_URL;
 /** Pays every order in dev; becomes the mock's user_id for all cards. */
@@ -86,8 +87,10 @@ export async function lasoOrderCard(amountUsd: number): Promise<LasoCardLink> {
   if (!encoded) throw new Error('laso /get-card: missing PAYMENT-REQUIRED header');
   const challenge = JSON.parse(b64decode(encoded));
   const accept =
-    challenge.accepts?.find((a: { network?: string }) => a.network === 'eip155:8453') ??
-    challenge.accepts?.[0];
+    challenge.accepts?.find((a: { network?: string }) =>
+      NETWORKS.some((n) => n.enabled && caipId(n) === a.network),
+    ) ?? challenge.accepts?.[0];
+
   if (!accept) throw new Error('laso /get-card: challenge has no payment options');
 
   const payment = {

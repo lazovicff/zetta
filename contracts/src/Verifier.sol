@@ -146,6 +146,7 @@ contract Verifier {
 
         require(root == transferRoot, "unknown root");
         require(proofRecipient == recipient, "recipient mismatch");
+        require(proof[2] == totalWithdrawn[recipient], "stale sum base");
 
         require(withdrawVerifier.verifyOpaqueNovaProof(proof), "invalid proof");
 
@@ -177,6 +178,7 @@ contract Verifier {
 
         require(transferRoot_ == transferRoot, "unknown root");
         require(proofRecipient == recipient, "recipient mismatch");
+        require(sum == totalWithdrawn[recipient], "stale sum base");
 
         require(singleWithdrawVerifier.verifyProof(pA, pB, pC, pubSignals), "invalid proof");
 

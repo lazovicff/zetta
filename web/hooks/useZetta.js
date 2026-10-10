@@ -20,7 +20,11 @@ export function useBalances() {
     address: A.usdc, abi: ERC20_ABI, functionName: "balanceOf",
     args: [address], chainId,
   });
-  return { usdc: usdc.data ?? 0n, zusdc: 0n };
+  const zusdc = useReadContract({
+    address: A.token, abi: ERC20_ABI, functionName: "balanceOf",
+    args: [address], chainId,
+  });
+  return { usdc: usdc.data ?? 0n, zusdc: zusdc.data ?? 0n };
 }
 
 export function useWrap() {

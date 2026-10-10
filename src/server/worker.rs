@@ -135,7 +135,6 @@ async fn prepare(
     let on_chain_chain = u256_to_fr(verifier.transferHashChain().block(block).call().await?);
 
     hydrate_registrations(s, db).await?;
-    hydrate_blacklist(s, db).await?;
 
     let events = fetch_chain_events(provider, config.token, from_block, latest).await?;
     let target_block = sync_chain(&mut *s, &events, on_chain_chain, &mut apply_transfer)?;
@@ -382,8 +381,20 @@ async fn submit_update_root(
     let t = Instant::now();
     let calldata = prove_root_transition(RootTransitionCircuit::new(())?, z_0, witnesses)?;
     info!(stage = "commit", elapsed = ?t.elapsed(), "root proof done");
-    let rc = send_and_confirm(wallet, provider, config.verifier, calldata.clone().into()).await?;
+
+    // calldata = [verifyOpaqueNovaProof selector (4B)] + [32 × 32B proof]
+    let proof: [U256; 32] = calldata[4..]
+        .chunks_exact(32)
+        .map(U256::from_be_slice)
+        .collect::<Vec<_>>()
+        .try_into()
+        .map_err(|v: Vec<U256>| format!("root proof has {} words, expected 32", v.len()))?;
+
+    let verifier = IVerifier::new(config.verifier, provider);
+    let call = verifier.updateRoot(proof);
+    let rc = send_and_confirm(wallet, provider, config.verifier, call.calldata().clone()).await?;
     info!(stage = "commit", tx = %rc.transaction_hash, gas = rc.gas_used, "updateRoot confirmed");
+
     Ok(())
 }
 
@@ -451,8 +462,25 @@ async fn submit_withdraws(
     let recip = recipient(work.chain_id, work.exchange_addr, work.tweak);
     let z_0 = vec![Fr::zero(), z0_sum, work.tree.root(), recip];
     let calldata = prove_withdraw(WithdrawCircuit::new(())?, z_0, witnesses)?;
-    let rc = send_and_confirm(wallet, provider, config.verifier, calldata.clone().into()).await?;
+
+    // calldata = [verifyOpaqueNovaProof selector (4B)] + [34 × 32B proof]
+    let proof: [U256; 34] = calldata[4..]
+        .chunks_exact(32)
+        .map(U256::from_be_slice)
+        .collect::<Vec<_>>()
+        .try_into()
+        .map_err(|v: Vec<U256>| format!("withdraw proof has {} words, expected 34", v.len()))?;
+
+    let verifier = IVerifier::new(config.verifier, provider);
+    let call = verifier.withdraw(
+        U256::from(work.chain_id),
+        Address::from(work.exchange_addr),
+        B256::from(work.tweak),
+        proof,
+    );
+    let rc = send_and_confirm(wallet, provider, config.verifier, call.calldata().clone()).await?;
     info!(stage = "withdraw", tx = %rc.transaction_hash, gas = rc.gas_used, "withdraw confirmed");
+
     Ok(())
 }
 
@@ -575,17 +603,13 @@ async fn hydrate_registrations(s: &mut State, db: &Db) -> Result<(), Box<dyn std
 /// Replay one proven transfer: tree insert + hash-chain step + ledger entries.
 fn apply_transfer(
     s: &mut State,
-    from: [u8; 20],
+    _: [u8; 20],
     to: [u8; 20],
     value: Fr,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let index = s.tree.len();
     s.tree.insert(poseidon2(address_to_fr(to), value)?);
     s.chain.apply(to, value);
-    if s.blacklist.contains(&from) {
-        warn!(from = %hex::encode(from), to = %hex::encode(to), "blacklisted sender — deposit not credited");
-        return Ok(());
-    }
     *s.credits.entry(to).or_default() += fr_to_u256(value);
     s.deposits.entry(to).or_default().push((value, index));
     Ok(())
@@ -686,10 +710,4 @@ pub fn log_recipient(state: &SharedState) {
     let s = state.lock().unwrap();
     let r = recipient(s.chain_id, s.exchange_addr, s.tweak);
     info!(stage = "boot", recipient = %r, "exchange recipient");
-}
-
-/// Compliance list; refreshed every tick so edits take effect without restart.
-async fn hydrate_blacklist(s: &mut State, db: &Db) -> Result<(), Box<dyn std::error::Error>> {
-    s.blacklist = db.blacklist().await?.into_iter().collect();
-    Ok(())
 }

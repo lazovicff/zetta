@@ -12,6 +12,7 @@ use privy_rs::generated::types::{
     Hex, Quantity, UnsignedStandardEthereumTransaction, WalletRpcResponse,
 };
 use privy_rs::{AuthorizationContext, PrivyClient};
+use privy_rs::{PrivySignedApiError, generated::Error as PrivyApiError};
 
 #[derive(Clone)]
 pub struct Wallet {
@@ -97,13 +98,17 @@ impl Wallet {
             gas_limit: gas.map(|g| Quantity::Integer(g)),
             ..Default::default()
         };
-        let r = self
+        let r = match self
             .client
             .wallets()
             .ethereum()
             .send_transaction(&self.wallet_id, &self.caip2, tx.into(), &ctx, None)
-            .await?
-            .into_inner();
+            .await
+        {
+            Ok(r) => r.into_inner(),
+            Err(e) => return Err(log_rpc_err("send_tx", e).await),
+        };
+
         match r {
             WalletRpcResponse::EthereumSendTransactionRpcResponse(resp) => {
                 Ok(String::from(resp.data.hash).parse()?)
@@ -133,6 +138,26 @@ impl Wallet {
                 Ok(String::from(resp.data.hash).parse()?)
             }
             other => Err(format!("unexpected rpc response: {other:?}").into()),
+        }
+    }
+}
+
+/// Log the full Privy error, including the JSON body for 4xx/5xx rejections.
+async fn log_rpc_err(ctx: &str, e: PrivySignedApiError) -> Box<dyn std::error::Error> {
+    match e {
+        PrivySignedApiError::Api(PrivyApiError::UnexpectedResponse(resp)) => {
+            let status = resp.status();
+            let url = resp.url().clone();
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|err| format!("<unreadable body: {err}>"));
+            tracing::error!(context = ctx, url = %url, status = %status, body = %body, "privy wallet rpc rejected");
+            format!("{ctx}: privy {status} for {url}: {body}").into()
+        }
+        other => {
+            tracing::error!(context = ctx, error = ?other, "privy wallet rpc failed");
+            format!("{ctx}: {other}").into()
         }
     }
 }
