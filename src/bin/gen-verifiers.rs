@@ -1,9 +1,9 @@
 use std::{fs, path::Path};
 
 use zetta::zkp::{
-    ARTIFACTS_DIR, read_root_params, read_single_root_params, read_single_withdraw_params,
-    read_withdraw_params, render_root_transition_verifier, render_single_root_transition_verifier,
-    render_single_withdraw_verifier, render_withdraw_verifier,
+    ARTIFACTS_DIR, read_root_params, read_single_root_params, read_withdraw_params,
+    render_root_transition_verifier, render_single_root_transition_verifier,
+    render_withdraw_verifier,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -24,10 +24,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(
         out_dir.join("SingleRootTransitionVerifier.sol"),
         render_single_root_transition_verifier(&read_single_root_params(artifacts)?.1)?,
-    )?;
-    fs::write(
-        out_dir.join("SingleWithdrawVerifier.sol"),
-        render_single_withdraw_verifier(&read_single_withdraw_params(artifacts)?.1)?,
     )?;
 
     println!("done");

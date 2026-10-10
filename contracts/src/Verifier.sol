@@ -41,11 +41,11 @@ contract Verifier {
     uint256 public reservedIndex;
 
     mapping(uint256 => uint256) public totalWithdrawn; // recipient => lifetime sum already minted
+    mapping(uint256 => uint256) public withdrawnIndex;
 
     IRootTransitionVerifier public rootTransitionVerifier;
     IWithdrawVerifier public withdrawVerifier;
     ISingleRootTransitionVerifier public singleRootTransitionVerifier;
-    ISingleWithdrawVerifier public singleWithdrawVerifier;
 
     address public owner;
 
@@ -70,12 +70,10 @@ contract Verifier {
     function setVerifiers(
         IRootTransitionVerifier root_,
         IWithdrawVerifier withdraw_,
-        ISingleWithdrawVerifier singleWithdraw_,
         ISingleRootTransitionVerifier singleRoot_
     ) external onlyOwner {
         rootTransitionVerifier = root_;
         withdrawVerifier = withdraw_;
-        singleWithdrawVerifier = singleWithdraw_;
         singleRootTransitionVerifier = singleRoot_;
     }
 
@@ -140,55 +138,27 @@ contract Verifier {
 
         uint256 recipient = computeRecipient(chainId, addr, tweak);
 
-        uint256 root = proof[3];           // z0[2] = transferRoot
-        uint256 proofRecipient = proof[4]; // z0[3] = recipient
-        uint256 sum = proof[6];            // zi[1] = lifetime sum for recipient
+        uint256 prevIndex = proof[1];
+        uint256 prevSum = proof[2];
+        uint256 root = proof[3];
+        uint256 proofRecipient = proof[4];
+        uint256 newIndex = proof[5];
+        uint256 sum = proof[6];
 
         require(root == transferRoot, "unknown root");
         require(proofRecipient == recipient, "recipient mismatch");
-        require(proof[2] == totalWithdrawn[recipient], "stale sum base");
+        require(prevSum == totalWithdrawn[recipient], "stale sum base");
+        require(prevIndex == withdrawnIndex[recipient], "stale frontier");   // z0[0] = indexWithOffset
 
         require(withdrawVerifier.verifyOpaqueNovaProof(proof), "invalid proof");
 
         uint256 delta = sum - totalWithdrawn[recipient];
         require(delta > 0, "nothing to withdraw");
         totalWithdrawn[recipient] = sum;
+        withdrawnIndex[recipient] = newIndex;
 
         token.teleport(addr, delta);
     }
-
-    /// pubSignals = [transferRoot, recipient, indexWithOffset, value]
-    /// indexWithOffset is an ordering token (mirrors Nova withdraw z0[0]) — not checked here.
-    function withdrawSingle(
-        uint256 chainId,
-        address addr,
-        bytes32 tweak,
-        uint256[2] calldata pA,
-        uint256[2][2] calldata pB,
-        uint256[2] calldata pC,
-        uint256[4] calldata pubSignals
-    ) external {
-        require(chainId == block.chainid, "wrong chain");
-
-        uint256 recipient = computeRecipient(chainId, addr, tweak);
-
-        uint256 transferRoot_ = pubSignals[0];
-        uint256 proofRecipient = pubSignals[1];
-        uint256 sum = pubSignals[3];
-
-        require(transferRoot_ == transferRoot, "unknown root");
-        require(proofRecipient == recipient, "recipient mismatch");
-        require(sum == totalWithdrawn[recipient], "stale sum base");
-
-        require(singleWithdrawVerifier.verifyProof(pA, pB, pC, pubSignals), "invalid proof");
-
-        uint256 delta = sum - totalWithdrawn[recipient];
-        require(delta > 0, "nothing to withdraw");
-        totalWithdrawn[recipient] = sum;
-
-        token.teleport(addr, delta);
-    }
-
 
     function computeRecipient(uint256 chainId, address addr, bytes32 tweak)
         public

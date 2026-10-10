@@ -31,13 +31,13 @@ sol! {
         function transferHashChain() external view returns (uint256);
         function transferIndex() external view returns (uint256);
         function totalWithdrawn(uint256) external view returns (uint256);
+        function withdrawIndex(uint256) external view returns (uint256);   // <-- add
         function reservedIndex() external view returns (uint256);
         function reservedHashChain() external view returns (uint256);
         function reserveHashChain() external;
         function updateRoot(uint256[32] proof) external;
         function updateRootSingle(uint256[2] pA, uint256[2][2] pB, uint256[2] pC, uint256[6] pubSignals) external;
         function withdraw(uint256 chainId, address addr, bytes32 tweak, uint256[34] proof) external;
-        function withdrawSingle(uint256 chainId, address addr, bytes32 tweak, uint256[2] pA, uint256[2][2] pB, uint256[2] pC, uint256[4] pubSignals) external;
     }
 }
 

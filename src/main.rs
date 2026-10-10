@@ -24,7 +24,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     zetta::zkp::cached_root_params()?;
     zetta::zkp::cached_withdraw_params()?;
     zetta::zkp::cached_single_root_params()?;
-    zetta::zkp::cached_single_withdraw_params()?;
     tracing::info!(stage = "boot", elapsed = ?t.elapsed(), "proving params loaded");
 
     let wallet = Wallet::new(

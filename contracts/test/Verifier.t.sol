@@ -7,7 +7,6 @@ import {
     Verifier,
     IRootTransitionVerifier,
     IWithdrawVerifier,
-    ISingleWithdrawVerifier,
     ISingleRootTransitionVerifier
 } from "../src/Verifier.sol";
 
@@ -31,23 +30,6 @@ contract MockWithdrawVerifier is IWithdrawVerifier {
     }
 
     function verifyOpaqueNovaProof(uint256[34] calldata) external view returns (bool) {
-        return result;
-    }
-}
-
-contract MockSingleWithdrawVerifier is ISingleWithdrawVerifier {
-    bool public result = true;
-
-    function setResult(bool r) external {
-        result = r;
-    }
-
-    function verifyProof(
-        uint256[2] calldata,
-        uint256[2][2] calldata,
-        uint256[2] calldata,
-        uint256[4] calldata
-    ) external view returns (bool) {
         return result;
     }
 }
@@ -76,7 +58,6 @@ contract VerifierTest is Test {
     Verifier verifier;
     MockRootVerifier rootV;
     MockWithdrawVerifier withdrawV;
-    MockSingleWithdrawVerifier singleV;
     MockSingleRootTransitionVerifier singleRootV;
 
     address alice = address(0xA11CE);
@@ -91,9 +72,8 @@ contract VerifierTest is Test {
         verifier = new Verifier(token, INITIAL_ROOT);
         rootV = new MockRootVerifier();
         withdrawV = new MockWithdrawVerifier();
-        singleV = new MockSingleWithdrawVerifier();
         singleRootV = new MockSingleRootTransitionVerifier();
-        verifier.setVerifiers(rootV, withdrawV, singleV, singleRootV);
+        verifier.setVerifiers(rootV, withdrawV, singleRootV);
         token.setVerifier(address(verifier));
     }
 

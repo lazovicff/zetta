@@ -2,7 +2,6 @@ mod poseidon;
 mod update_root;
 mod update_root_single;
 mod withdraw;
-mod withdraw_single;
 
 use ark_bn254::{Bn254, Fr, G1Projective as G1};
 use ark_groth16::{Groth16, ProvingKey, VerifyingKey};
@@ -23,7 +22,6 @@ pub use poseidon::*;
 pub use update_root::*;
 pub use update_root_single::*;
 pub use withdraw::*;
-pub use withdraw_single::*;
 
 use solidity_verifiers::calldata::{
     NovaVerificationMode, prepare_calldata_for_nova_cyclefold_verifier,
@@ -284,15 +282,6 @@ groth16_artifact_set!(
     cached = cached_single_root_params,
     render_verifier = render_single_root_transition_verifier
 );
-groth16_artifact_set!(
-    "single_withdraw",
-    SingleWithdrawCircuit,
-    create = create_single_withdraw_params,
-    read = read_single_withdraw_params,
-    write = write_single_withdraw_params,
-    cached = cached_single_withdraw_params,
-    render_verifier = render_single_withdraw_verifier
-);
 
 // ---- proving ----
 
@@ -407,25 +396,6 @@ pub fn prove_single_root_transition(
         circuit.z_1[2],
     ];
     let proof = Groth16::<Bn254>::prove(&params.0, circuit, &mut rng)?;
-    Ok((proof, public_inputs))
-}
-
-/// Prove a single withdrawal. Returns (proof, public_inputs).
-pub fn prove_single_withdraw(
-    circuit: SingleWithdrawCircuit,
-) -> Result<(ark_groth16::Proof<Bn254>, Vec<Fr>), Box<dyn std::error::Error>> {
-    use std::time::Instant;
-    let start = Instant::now();
-    let params = cached_single_withdraw_params()?;
-    let mut rng = ark_std::rand::rngs::OsRng;
-    let public_inputs = vec![
-        circuit.transfer_root,
-        circuit.recipient,
-        circuit.index_with_offset,
-        circuit.witness.value,
-    ];
-    let proof = Groth16::<Bn254>::prove(&params.0, circuit, &mut rng)?;
-    info!(proof = "prove_single_withdraw", elapsed = ?start.elapsed(), "single-withdraw Groth16 proof done");
     Ok((proof, public_inputs))
 }
 

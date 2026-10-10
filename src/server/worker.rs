@@ -30,9 +30,9 @@ use std::time::Instant;
 use crate::server::fq_to_u256;
 use crate::tree::TREE_DEPTH;
 use crate::zkp::{
-    RootTransitionCircuit, RootTransitionWitness, SingleRootTransitionCircuit,
-    SingleWithdrawCircuit, WithdrawCircuit, WithdrawWitness, poseidon2, prove_root_transition,
-    prove_single_root_transition, prove_single_withdraw, prove_withdraw,
+    RootTransitionCircuit, RootTransitionWitness, SingleRootTransitionCircuit, WithdrawCircuit,
+    WithdrawWitness, poseidon2, prove_root_transition, prove_single_root_transition,
+    prove_withdraw,
 };
 
 /// Max blocks per eth_getLogs call — under hosted-RPC range caps.
@@ -94,8 +94,6 @@ pub async fn run(
     }
 }
 
-/// Step 0 — pin the epoch target on-chain BEFORE the phase-1 snapshot, so the
-/// snapshot's transfer window provably covers everything up to the reservation.
 async fn reserve(
     provider: &impl Provider,
     wallet: &Wallet,
@@ -181,50 +179,52 @@ async fn process(
     let reserved_chain = u256_to_fr(verifier.reservedHashChain().call().await?);
     let proven = work.chain.index();
 
-    if reserved_index > proven {
-        let z_0 = vec![Fr::from(proven), work.chain.state(), work.tree.root()];
+    if proven >= reserved_index {
+        return Ok(());
+    }
 
-        // Fetched AFTER the reserve mined, so the window contains the reserved
-        // chain value; the walk stops exactly at it — including mid-block.
-        let latest = provider.get_block_number().await?;
-        let events = fetch_chain_events(provider, config.token, from_block, latest).await?;
-        let mut witnesses = Vec::new();
-        sync_chain(
-            &mut work,
-            &events,
-            reserved_chain,
-            &mut |s, from, to, value| {
-                witnesses.push(commit_transfer(s, from, to, value)?);
-                Ok(())
-            },
-        )?;
-        if work.chain.index() != reserved_index {
-            return Err(format!(
-                "reserved chain reached at index {} but reservedIndex is {reserved_index}",
-                work.chain.index()
-            )
-            .into());
-        }
+    let z_0 = vec![Fr::from(proven), work.chain.state(), work.tree.root()];
 
-        if witnesses.len() == 1 {
-            let z_0 = [z_0[0], z_0[1], z_0[2]];
-            let z_1 = [
-                Fr::from(work.chain.index()),
-                work.chain.state(),
-                work.tree.root(),
-            ];
-            submit_single_update_root(
-                wallet,
-                provider,
-                config,
-                z_0,
-                z_1,
-                witnesses.into_iter().next().unwrap(),
-            )
-            .await?;
-        } else {
-            submit_update_root(wallet, provider, config, z_0, witnesses).await?;
-        }
+    // Fetched AFTER the reserve mined, so the window contains the reserved
+    // chain value; the walk stops exactly at it — including mid-block.
+    let latest = provider.get_block_number().await?;
+    let events = fetch_chain_events(provider, config.token, from_block, latest).await?;
+    let mut witnesses = Vec::new();
+    sync_chain(
+        &mut work,
+        &events,
+        reserved_chain,
+        &mut |s, from, to, value| {
+            witnesses.push(commit_transfer(s, from, to, value)?);
+            Ok(())
+        },
+    )?;
+    if work.chain.index() != reserved_index {
+        return Err(format!(
+            "reserved chain reached at index {} but reservedIndex is {reserved_index}",
+            work.chain.index()
+        )
+        .into());
+    }
+
+    if witnesses.len() == 1 {
+        let z_0 = [z_0[0], z_0[1], z_0[2]];
+        let z_1 = [
+            Fr::from(work.chain.index()),
+            work.chain.state(),
+            work.tree.root(),
+        ];
+        submit_single_update_root(
+            wallet,
+            provider,
+            config,
+            z_0,
+            z_1,
+            witnesses.into_iter().next().unwrap(),
+        )
+        .await?;
+    } else {
+        submit_update_root(wallet, provider, config, z_0, witnesses).await?;
     }
 
     // ---- withdraws: fold only the not-yet-withdrawn suffix of proven deposits ----
@@ -232,7 +232,9 @@ async fn process(
         return Ok(());
     };
     let recip = recipient(work.chain_id, work.exchange_addr, work.tweak);
-    let withdrawn = verifier.totalWithdrawn(fr_to_u256(recip)).call().await?;
+    let recip_u = fr_to_u256(recip);
+    let withdrawn = verifier.totalWithdrawn(recip_u).call().await?;
+    let frontier = verifier.withdrawIndex(recip_u).call().await?;
     let total = witnesses
         .iter()
         .fold(U256::ZERO, |acc, w| acc + fr_to_u256(w.value));
@@ -258,32 +260,20 @@ async fn process(
         .into());
     }
 
-    // The Nova decider needs >= 2 steps: pad a single-receipt batch with one
-    // already-covered receipt on the left, shifting the fold's base by it.
-    let pad = witnesses.len() - k == 1 && k > 0;
-    let k = if pad { k - 1 } else { k };
-    let z0_sum = prefix
-        - if pad {
-            fr_to_u256(witnesses[k].value)
-        } else {
-            U256::ZERO
-        };
-
     let batch: Vec<WithdrawWitness> = witnesses[k..].to_vec();
     if batch.len() == 1 {
         // Reachable only when totalWithdrawn == 0, so the value IS the sum.
-        submit_single_withdraw(
-            wallet,
-            provider,
-            config,
-            &work,
-            batch.into_iter().next().unwrap(),
-        )
-        .await?;
-    } else {
-        submit_withdraws(wallet, provider, config, &work, batch, u256_to_fr(z0_sum)).await?;
+        return Err(format!("need >=2 witness batch for withdraw, got 1").into());
     }
 
+    let z_0 = vec![
+        u256_to_fr(frontier),  // z_0[0] = indexWithOffset (frontier)
+        u256_to_fr(withdrawn), // z_0[1] = totalValue base
+        work.tree.root(),      // z_0[2] = transferRoot
+        recip,                 // z_0[3] = recipient
+    ];
+
+    submit_withdraws(wallet, provider, config, &work, z_0, batch).await?;
     unwrap_after_withdraw(provider, wallet, config).await?;
 
     Ok(())
@@ -398,51 +388,6 @@ async fn submit_update_root(
     Ok(())
 }
 
-/// First-ever withdraw of a recipient namespace (totalWithdrawn == 0): a
-/// Groth16 proof over the single receipt whose value IS the lifetime sum.
-async fn submit_single_withdraw(
-    wallet: &Wallet,
-    provider: &impl Provider,
-    config: &Config,
-    work: &State,
-    witness: WithdrawWitness,
-) -> Result<(), Box<dyn std::error::Error>> {
-    info!(
-        stage = "withdraw",
-        kind = "single",
-        "proving single withdraw (Groth16)"
-    );
-    let recip = recipient(work.chain_id, work.exchange_addr, work.tweak);
-    let circuit = SingleWithdrawCircuit {
-        transfer_root: work.tree.root(),
-        recipient: recip,
-        index_with_offset: Fr::zero(),
-        witness,
-    };
-    let value = circuit.witness.value;
-    let (proof, _) = prove_single_withdraw(circuit)?;
-    let (a, b, c) = pack_groth16(&proof);
-    let signals: [U256; 4] = [
-        fr_to_u256(work.tree.root()),
-        fr_to_u256(recip),
-        U256::ZERO, // index_with_offset = 0 (single-shot fold)
-        fr_to_u256(value),
-    ];
-    let verifier = IVerifier::new(config.verifier, provider);
-    let call = verifier.withdrawSingle(
-        U256::from(work.chain_id),
-        Address::from(work.exchange_addr),
-        B256::from(work.tweak),
-        a,
-        b,
-        c,
-        signals,
-    );
-    let rc = send_and_confirm(wallet, provider, config.verifier, call.calldata().clone()).await?;
-    info!(stage = "withdraw", tx = %rc.transaction_hash, gas = rc.gas_used, "withdrawSingle confirmed");
-    Ok(())
-}
-
 /// Batch withdraw — Nova IVC per receipt + Groth16 decider. The fold starts
 /// at cumulative base `z0_sum` (the already-withdrawn prefix sum), so the
 /// contract mints exactly Σ witnesses on top of totalWithdrawn.
@@ -451,19 +396,17 @@ async fn submit_withdraws(
     provider: &impl Provider,
     config: &Config,
     work: &State,
+    z_0: Vec<Fr>,
     witnesses: Vec<WithdrawWitness>,
-    z0_sum: Fr,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!(
         stage = "withdraw",
         receipts = witnesses.len(),
         "proving batch withdraw (Nova + decider)"
     );
-    let recip = recipient(work.chain_id, work.exchange_addr, work.tweak);
-    let z_0 = vec![Fr::zero(), z0_sum, work.tree.root(), recip];
+
     let calldata = prove_withdraw(WithdrawCircuit::new(())?, z_0, witnesses)?;
 
-    // calldata = [verifyOpaqueNovaProof selector (4B)] + [34 × 32B proof]
     let proof: [U256; 34] = calldata[4..]
         .chunks_exact(32)
         .map(U256::from_be_slice)
