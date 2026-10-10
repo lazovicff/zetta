@@ -666,12 +666,22 @@ fn sync_chain(
     if s.chain.state() == target {
         return Ok(None); // already at the frontier
     }
-    let mut synced = s.chain.state().is_zero(); // genesis: start from the first event
-    for &(blk, from, to, value, carried) in events {
-        if !synced {
-            synced = carried == s.chain.state();
-            continue; // skip up to and including the sync event
+
+    let mut it = events.iter().copied();
+    let start = s.chain.state();
+
+    // Loop 1 — find the starting state: skip up to and including the sync
+    // event (the last transfer the mirror already ingested). Genesis has no
+    // history, so there's nothing to skip.
+    if !start.is_zero() {
+        match it.find(|&(_, _, _, _, carried)| carried == start) {
+            Some(_) => {} // `it` is now positioned just past the sync event
+            None => return Err("sync point not in window: stale cursor or reorg".into()),
         }
+    }
+
+    // Loop 2 — apply from the carried state until the target chain is reached.
+    for (blk, from, to, value, carried) in it {
         apply(s, from, to, value)?;
         if s.chain.state() != carried {
             return Err(format!(
@@ -683,11 +693,8 @@ fn sync_chain(
             return Ok(Some(blk));
         }
     }
-    Err(if synced {
-        format!("target chain value {target} not in window").into()
-    } else {
-        "sync point not in window: stale cursor or reorg".into()
-    })
+
+    Err(format!("target chain value {target} not in window").into())
 }
 
 pub async fn send_and_confirm(
