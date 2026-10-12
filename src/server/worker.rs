@@ -83,7 +83,7 @@ pub async fn run(
 
         // Phase 2: reserve at the tip, then process the fresh chunk.
         reserve(provider, wallet, config).await?;
-        process(state, provider, wallet, config, last_block).await?;
+        process(state, provider, wallet, config, db, last_block).await?;
 
         // Phase 3: run payouts separately.
         if let Err(e) = payouts(provider, wallet, config, db).await {
@@ -169,6 +169,7 @@ async fn process(
     provider: &impl Provider,
     wallet: &Wallet,
     config: &Config,
+    db: &Db,
     from_block: u64, // last prepared block; events after it start at `proven`
 ) -> Result<(), Box<dyn std::error::Error>> {
     let verifier = IVerifier::new(config.verifier, provider);
@@ -227,54 +228,25 @@ async fn process(
         submit_update_root(wallet, provider, config, z_0, witnesses).await?;
     }
 
-    // ---- withdraws: fold only the not-yet-withdrawn suffix of proven deposits ----
-    let Some(witnesses) = withdraw_witnesses(&work) else {
+    // ---- withdraws: fold all reposits for a given recipient in the current namespace ----
+    let recip = recipient(work.chain_id, work.exchange_addr, work.tweak);
+    let Some(witnesses) = withdraw_witnesses(&work, recip) else {
         return Ok(());
     };
-    let recip = recipient(work.chain_id, work.exchange_addr, work.tweak);
-    let recip_u = fr_to_u256(recip);
-    let withdrawn = verifier.totalWithdrawn(recip_u).call().await?;
-    let frontier = verifier.withdrawIndex(recip_u).call().await?;
-    let total = witnesses
-        .iter()
-        .fold(U256::ZERO, |acc, w| acc + fr_to_u256(w.value));
-    if total <= withdrawn {
-        debug!(stage = "withdraw", "nothing new beyond totalWithdrawn");
-        return Ok(());
-    }
-
-    // Prior folds covered an index-contiguous prefix summing to exactly
-    // `withdrawn` — cut the list there and fold only the new suffix.
-    let mut prefix = U256::ZERO;
-    let mut k = 0;
-    while k < witnesses.len() && prefix < withdrawn {
-        prefix += fr_to_u256(witnesses[k].value);
-        k += 1;
-    }
-    if prefix != withdrawn {
-        // Unreachable with the registered_from boundary: a pre-registration
-        // deposit never enters the witness set.
-        return Err(format!(
-            "totalWithdrawn {withdrawn} misaligned with receipt prefix — deposit before registration?"
-        )
-        .into());
-    }
-
-    let batch: Vec<WithdrawWitness> = witnesses[k..].to_vec();
-    if batch.len() == 1 {
-        // Reachable only when totalWithdrawn == 0, so the value IS the sum.
-        return Err(format!("need >=2 witness batch for withdraw, got 1").into());
-    }
-
+    let count = witnesses.len();
     let z_0 = vec![
-        u256_to_fr(frontier),  // z_0[0] = indexWithOffset (frontier)
-        u256_to_fr(withdrawn), // z_0[1] = totalValue base
-        work.tree.root(),      // z_0[2] = transferRoot
-        recip,                 // z_0[3] = recipient
+        Fr::zero(),       // z_0[0] = indexWithOffset (always 0)
+        Fr::zero(),       // z_0[1] = totalValue base (always 0)
+        work.tree.root(), // z_0[2] = transferRoot
+        recip,            // z_0[3] = recipient
     ];
 
-    submit_withdraws(wallet, provider, config, &work, z_0, batch).await?;
+    submit_withdraws(wallet, provider, config, &work, z_0, witnesses).await?;
     unwrap_after_withdraw(provider, wallet, config).await?;
+
+    if count as u64 > work.rotate_threshold {
+        rotate_tweak(db).await?;
+    }
 
     Ok(())
 }
@@ -427,11 +399,14 @@ async fn submit_withdraws(
     Ok(())
 }
 
-/// Withdraw witnesses for every deposit in the working copy (all proven,
-/// after the epoch above or by phase 1). Returns None when there are none.
-fn withdraw_witnesses(s: &State) -> Option<Vec<WithdrawWitness>> {
+/// Withdraw witnesses for deposits registered under `recipient` (one tweak's
+/// namespace). Returns None when there are none for that recipient.
+fn withdraw_witnesses(s: &State, recipient: Fr) -> Option<Vec<WithdrawWitness>> {
     let mut receipts: Vec<(usize, G2, G2, Fq, Fr, Fr)> = Vec::new();
     for (addr, ds) in &s.deposits {
+        if s.recipient_by_addr.get(addr) != Some(&recipient) {
+            continue; // prior tweak / unregistered — proven in its own batch
+        }
         let (Some(&pk), Some(&(sig_r, sig_z)), Some(&salt), Some(&from)) = (
             s.pubkey_by_addr.get(addr),
             s.sig_by_addr.get(addr),
@@ -440,7 +415,7 @@ fn withdraw_witnesses(s: &State) -> Option<Vec<WithdrawWitness>> {
         ) else {
             continue;
         };
-        for &(value, idx) in ds {
+        for &(_, value, idx) in ds {
             if (idx as u64) < from {
                 continue; // pre-registration deposit — burned, never folded
             }
@@ -539,6 +514,7 @@ async fn hydrate_registrations(s: &mut State, db: &Db) -> Result<(), Box<dyn std
         s.salt_by_addr.insert(r.address, r.salt);
         s.registered_from
             .insert(r.address, r.registered_from as u64);
+        s.recipient_by_addr.insert(r.address, r.recipient);
     }
     Ok(())
 }
@@ -546,7 +522,7 @@ async fn hydrate_registrations(s: &mut State, db: &Db) -> Result<(), Box<dyn std
 /// Replay one proven transfer: tree insert + hash-chain step + ledger entries.
 fn apply_transfer(
     s: &mut State,
-    _: [u8; 20],
+    from: [u8; 20],
     to: [u8; 20],
     value: Fr,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -554,7 +530,7 @@ fn apply_transfer(
     s.tree.insert(poseidon2(address_to_fr(to), value)?);
     s.chain.apply(to, value);
     *s.credits.entry(to).or_default() += fr_to_u256(value);
-    s.deposits.entry(to).or_default().push((value, index));
+    s.deposits.entry(to).or_default().push((from, value, index));
     Ok(())
 }
 
@@ -660,4 +636,10 @@ pub fn log_recipient(state: &SharedState) {
     let s = state.lock().unwrap();
     let r = recipient(s.chain_id, s.exchange_addr, s.tweak);
     info!(stage = "boot", recipient = %r, "exchange recipient");
+}
+
+async fn rotate_tweak(db: &Db) -> Result<(), Box<dyn std::error::Error>> {
+    let next = db.rotate_tweak().await?;
+    info!(stage = "rotate", tweak = %next, "tweak rotated");
+    Ok(())
 }

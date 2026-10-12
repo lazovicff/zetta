@@ -695,6 +695,21 @@ impl Db {
             .fetch_one(&self.0)
             .await
     }
+
+    /// Increment the stored tweak by one; returns the new value (decimal).
+    pub async fn rotate_tweak(&self) -> Result<U256, Box<dyn std::error::Error>> {
+        let row = sqlx::query("SELECT value FROM settings WHERE key = 'tweak'")
+            .fetch_one(&self.0)
+            .await?;
+        let val: String = row.try_get("value")?;
+        let cur = U256::from_str_radix(&val, 10)?;
+        let next = cur + U256::from(1u64);
+        sqlx::query("UPDATE settings SET value = $1 WHERE key = 'tweak'")
+            .bind(next.to_string())
+            .execute(&self.0)
+            .await?;
+        Ok(next)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -760,6 +775,7 @@ impl Db {
 }
 
 pub struct Settings {
+    pub rotate_threshold: u64,
     pub tweak: [u8; 32],
     pub poll_interval_secs: u64,
     pub max_users: i64,
@@ -802,6 +818,7 @@ impl Db {
                 .ok_or_else(|| format!("missing settings row: {k}"))
         };
         Ok(Settings {
+            rotate_threshold: u64::from_str_radix(take("rotate_threshold")?, 10)?,
             tweak: parse_tweak(take("tweak")?)?,
             poll_interval_secs: take("poll_interval_secs")?.parse()?,
             max_users: take("max_users")?.parse()?,
