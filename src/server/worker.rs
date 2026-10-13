@@ -234,6 +234,15 @@ async fn process(
         return Ok(());
     };
     let count = witnesses.len();
+
+    if count <= 1 {
+        debug!(
+            stage = "withdraw",
+            count, "need >=2 receipts for a batch; deferring"
+        );
+        return Ok(());
+    }
+
     let z_0 = vec![
         Fr::zero(),       // z_0[0] = indexWithOffset (always 0)
         Fr::zero(),       // z_0[1] = totalValue base (always 0)

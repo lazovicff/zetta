@@ -27,12 +27,11 @@ sol! {
     interface IAdmin {
         function setMinter(address m) external;
         function setVerifier(address v) external;
-        function setVerifiers(address root, address withdraw, address singleWithdraw, address singleRoot) external;
+        function setVerifiers(address root, address withdraw, address singleRoot) external;
         function transferOwnership(address newOwner) external;
         function owner() external view returns (address);
         function rootTransitionVerifier() external view returns (address);
         function withdrawVerifier() external view returns (address);
-        function singleWithdrawVerifier() external view returns (address);
         function singleRootTransitionVerifier() external view returns (address);
         function USDC() external view returns (address);
         function TOKEN() external view returns (address);
@@ -317,17 +316,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut receipts,
     )
     .await?;
-    let single_withdraw_v = deploy(
-        &wallet,
-        &provider,
-        "SingleWithdrawVerifier",
-        "Groth16Verifier",
-        &libs,
-        vec![],
-        &mut txs,
-        &mut receipts,
-    )
-    .await?;
     let single_root_v = deploy(
         &wallet,
         &provider,
@@ -362,7 +350,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         IAdmin::setVerifiersCall {
             root: root_v,
             withdraw: withdraw_v,
-            singleWithdraw: single_withdraw_v,
             singleRoot: single_root_v,
         }
         .abi_encode(),
@@ -429,14 +416,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         verifier,
         IAdmin::withdrawVerifierCall {}.abi_encode(),
         withdraw_v,
-    )
-    .await?;
-    expect_addr(
-        &provider,
-        "Verifier.singleWithdrawVerifier",
-        verifier,
-        IAdmin::singleWithdrawVerifierCall {}.abi_encode(),
-        single_withdraw_v,
     )
     .await?;
     expect_addr(

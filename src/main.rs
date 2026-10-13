@@ -68,5 +68,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     tracing::info!(stage = "boot", port = config.port, "HTTP server bound");
 
-    worker::run(&state, &provider, &wallet, &config, &db).await
+    // Worker runs forever; on any error, log and restart instead of exiting.
+    loop {
+        if let Err(e) = worker::run(&state, &provider, &wallet, &config, &db).await {
+            tracing::error!(error = %e, "worker error; restarting in 5s");
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    }
 }

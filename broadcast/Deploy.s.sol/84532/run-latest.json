@@ -1,85 +1,75 @@
 {
   "receipts": [
     {
-      "blockNumber": "0x2daf305",
-      "transactionHash": "0xeede3ba2ce986d1a53f367c94198fe30abed51b0b99f7648c4340bc2274ee369"
+      "blockNumber": "0x2dd7215",
+      "transactionHash": "0x2c2ba4bbe13fa7fa868c1349ab87736c71d5dfd207f2d0d8a619ee05e38f55c6"
     },
     {
-      "blockNumber": "0x2daf306",
-      "transactionHash": "0x6dcd723b8d46097d4cf1ecaa654a296add2369336b01a564d99cc1aec7381946"
+      "blockNumber": "0x2dd7215",
+      "transactionHash": "0x587b516031fffbdb86288c61775889dd25b60987ce7a6c0a97b69b9dec135cf2"
     },
     {
-      "blockNumber": "0x2daf306",
-      "transactionHash": "0x39067f898137deb3e3c57a1e0eeec6c112829777d105dd4a0c2683a07f3ceea7"
+      "blockNumber": "0x2dd7216",
+      "transactionHash": "0xe0e96c5ccd38cf6882a3e7897c77596058b80e3aebdd9265fd65751d6f1e80ce"
     },
     {
-      "blockNumber": "0x2daf307",
-      "transactionHash": "0xf81e1b83a06a991649c4856ac8a06a0578b108717743dec34864ff591770e92c"
+      "blockNumber": "0x2dd7216",
+      "transactionHash": "0x8968d5b45ebb9550cd541b65d7a3d78adb613eec4ff5bf1fdbd30e397d7c0b99"
     },
     {
-      "blockNumber": "0x2daf307",
-      "transactionHash": "0xcdc5105f0c035d7c2cc3445bdf6e489b1f1f03c744aa1d81ca41efec3b1964ea"
+      "blockNumber": "0x2dd7217",
+      "transactionHash": "0x3f4749c162db49327e6242d34ad84eb24a4345b1a0056fec1eee79fca3d9e814"
     },
     {
-      "blockNumber": "0x2daf308",
-      "transactionHash": "0x52c7518c2c272d898ff8366f7f88d934cce14592e8de6d839c74ad4e4513efea"
+      "blockNumber": "0x2dd7218",
+      "transactionHash": "0x66e89c61fce08ad88bc00199cab4c731df47098806137a3ccb1658da9bf004ca"
     },
     {
-      "blockNumber": "0x2daf308",
-      "transactionHash": "0x577b1da2ec9fcc6540ce7f8bed591be6202659b19d1c0bbccfd6e12d8c970d96"
-    },
-    {
-      "blockNumber": "0x2daf309",
-      "transactionHash": "0x4691435656359958dbcd75f5beb56b00628fb9d26370edef94354f2ac7f77dd9"
+      "blockNumber": "0x2dd7218",
+      "transactionHash": "0x84484f98720cbd6ba24d7c586fa36ace078241acda9e538befdd57c6c2f32326"
     }
   ],
   "transactions": [
     {
-      "contractAddress": "0xCA439AD093301Be2a49da65E398C942268D0f9D4",
+      "contractAddress": "0x8C718a51762B31F1d6b11Af5A127d3fb8FbbDfb8",
       "contractName": "PoseidonT4",
-      "hash": "0xeede3ba2ce986d1a53f367c94198fe30abed51b0b99f7648c4340bc2274ee369",
+      "hash": "0x2c2ba4bbe13fa7fa868c1349ab87736c71d5dfd207f2d0d8a619ee05e38f55c6",
       "transactionType": "CREATE"
     },
     {
-      "contractAddress": "0x1872ab95B91B7a29dF77eC84Ea8aBa40CE9b809C",
+      "contractAddress": "0x15A93F1D5600371E3CEf90A1fEDF798425FB5DD5",
       "contractName": "zERC20",
-      "hash": "0x6dcd723b8d46097d4cf1ecaa654a296add2369336b01a564d99cc1aec7381946",
+      "hash": "0x587b516031fffbdb86288c61775889dd25b60987ce7a6c0a97b69b9dec135cf2",
       "transactionType": "CREATE"
     },
     {
-      "contractAddress": "0xdCbAad16A0B908F59eE86E16Eb016Ba0bd416091",
+      "contractAddress": "0xBae97AD0004A2889d456D72483D792e364bccAD0",
       "contractName": "USDCVault",
-      "hash": "0x39067f898137deb3e3c57a1e0eeec6c112829777d105dd4a0c2683a07f3ceea7",
+      "hash": "0xe0e96c5ccd38cf6882a3e7897c77596058b80e3aebdd9265fd65751d6f1e80ce",
       "transactionType": "CREATE"
     },
     {
-      "contractAddress": "0xFd641D7Ffb90ABEBC8d278Fc0B110bE2CFc0C348",
+      "contractAddress": "0x1A38ffB4Ae93b5B4D02c542741Dd32b256742573",
       "contractName": "NovaDecider",
-      "hash": "0xf81e1b83a06a991649c4856ac8a06a0578b108717743dec34864ff591770e92c",
+      "hash": "0x8968d5b45ebb9550cd541b65d7a3d78adb613eec4ff5bf1fdbd30e397d7c0b99",
       "transactionType": "CREATE"
     },
     {
-      "contractAddress": "0x4aC0D4Bfd4ac1de1cE340A493ab9Bb059F06F58E",
+      "contractAddress": "0xB683252a774336395d8C8FC16abf9FECeAa4c906",
       "contractName": "NovaDecider",
-      "hash": "0xcdc5105f0c035d7c2cc3445bdf6e489b1f1f03c744aa1d81ca41efec3b1964ea",
+      "hash": "0x3f4749c162db49327e6242d34ad84eb24a4345b1a0056fec1eee79fca3d9e814",
       "transactionType": "CREATE"
     },
     {
-      "contractAddress": "0x9cdf30b71090D4063f4C07E347344E9f5A781752",
+      "contractAddress": "0xb8d823Aa4c3C689e9a358C5609a3F821f068348F",
       "contractName": "Groth16Verifier",
-      "hash": "0x52c7518c2c272d898ff8366f7f88d934cce14592e8de6d839c74ad4e4513efea",
+      "hash": "0x66e89c61fce08ad88bc00199cab4c731df47098806137a3ccb1658da9bf004ca",
       "transactionType": "CREATE"
     },
     {
-      "contractAddress": "0x2Fe74b9034134ba02B902221992a784D175b708E",
-      "contractName": "Groth16Verifier",
-      "hash": "0x577b1da2ec9fcc6540ce7f8bed591be6202659b19d1c0bbccfd6e12d8c970d96",
-      "transactionType": "CREATE"
-    },
-    {
-      "contractAddress": "0x5D1393b77575e8DD5af1A82E1ff1556d6f54b8EF",
+      "contractAddress": "0xa989a9095A71B30FAC9E5392ffDB83432C88a2e9",
       "contractName": "Verifier",
-      "hash": "0x4691435656359958dbcd75f5beb56b00628fb9d26370edef94354f2ac7f77dd9",
+      "hash": "0x84484f98720cbd6ba24d7c586fa36ace078241acda9e538befdd57c6c2f32326",
       "transactionType": "CREATE"
     }
   ]
